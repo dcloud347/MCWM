@@ -46,14 +46,15 @@ raw_root="$(mkdir -p data/vpt/raw && realpath data/vpt/raw)"
 base_url="$(jq -r '.basedir' data/vpt/vpt-7x-index.json)"
 
 while IFS= read -r relpath; do
-  version="${relpath%%/*}"
-  stem="${relpath##*/}"
+  version_and_file="${relpath#data/}"
+  version="${version_and_file%%/*}"
+  video_file="${relpath##*/}"
+  stem="${video_file%.mp4}"
   mkdir -p "$raw_root/$version"
-  for extension in mp4 jsonl; do
-    printf '%s%s.%s\n  dir=%s/%s\n  out=%s.%s\n' \
-      "$base_url" "$relpath" "$extension" \
-      "$raw_root" "$version" "$stem" "$extension"
-  done
+  printf '%s%s\n  dir=%s/%s\n  out=%s.mp4\n' \
+    "$base_url" "$relpath" "$raw_root" "$version" "$stem"
+  printf '%s%s.jsonl\n  dir=%s/%s\n  out=%s.jsonl\n' \
+    "$base_url" "${relpath%.mp4}" "$raw_root" "$version" "$stem"
 done < data/vpt/selected-relpaths.txt > data/vpt/aria2-input.txt
 
 aria2c \
@@ -84,8 +85,10 @@ raw_root="$(realpath data/vpt/raw)"
 canonical_root="$(realpath data/canonical)"
 
 while IFS= read -r relpath; do
-  version="${relpath%%/*}"
+  version_and_file="${relpath#data/}"
+  version="${version_and_file%%/*}"
   stem="${relpath##*/}"
+  stem="${stem%.mp4}"
   episode_id="${relpath//\//__}"
   video="$raw_root/$version/$stem.mp4"
   actions="$raw_root/$version/$stem.jsonl"
