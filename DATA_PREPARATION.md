@@ -75,7 +75,7 @@ df -h data
 
 ## 4. 转换为 canonical episodes
 
-VPT action 的 `milli` 是墙上时钟时间，而 MP4 PTS 从接近零的位置开始。下面的循环会先归一化每个动作文件，再执行导入；同一 session 会稳定地进入同一个 split，比例为 90% train、5% validation、5% test。
+VPT action 的 `milli` 是墙上时钟时间，而 MP4 PTS 从接近零的位置开始。下面的循环会先归一化每个动作文件，再执行导入。官方索引没有提供可靠的 world ID，因此这里保守地用 contractor alias 作为 split group：同一 contractor 的全部 session（以及其中可能重复使用的 world）只会进入一个 split。hash bucket 的目标比例为 90% train、5% validation、5% test；由于按 contractor 分组，最终 episode 数量比例可能偏离该目标。
 
 ```bash
 set -euo pipefail
@@ -90,17 +90,32 @@ while IFS= read -r relpath; do
   video="$raw_root/$version/$stem.mp4"
   actions="$raw_root/$version/$stem.jsonl"
 
-  if [ -f "$canonical_root/episodes/$episode_id/manifest.json" ]; then
+  episode_dir="$canonical_root/episodes/$episode_id"
+  if [ -f "$episode_dir/manifest.json" ] \
+    && [ -f "$episode_dir/actions.jsonl" ] \
+    && [ -f "$episode_dir/frame_timestamps.json" ]; then
     echo "already ingested: $episode_id"
     continue
+  fi
+  if [ -e "$episode_dir" ]; then
+    echo "incomplete episode directory; inspect and remove it before retrying: $episode_dir" >&2
+    exit 1
   fi
 
   without_time="${stem%-*}"
   without_date="${without_time%-*}"
   session_id="${without_date##*-}"
-  world_id="$session_id"
+  contractor_alias="${without_date%-$session_id}"
+  if [ -z "$contractor_alias" ] || [ "$contractor_alias" = "$without_date" ]; then
+    echo "cannot parse contractor alias and session ID from: $stem" >&2
+    exit 1
+  fi
+  split_group="contractor:$contractor_alias"
+  # VPT 7.x 的公开索引没有 world ID。使用保守分组键，防止同一
+  # contractor 跨 session 重用的 world 泄漏到不同 split。
+  world_id="$split_group"
 
-  digest="$(printf '%s' "$session_id" | sha256sum | cut -c1-8)"
+  digest="$(printf '%s' "$split_group" | sha256sum | cut -c1-8)"
   bucket=$((16#$digest % 100))
   if [ "$bucket" -lt 90 ]; then
     split=train

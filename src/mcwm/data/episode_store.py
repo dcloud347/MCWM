@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import tempfile
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from mcwm.actions.codec import action_to_dict, read_actions_jsonl, write_actions_jsonl
@@ -64,13 +65,24 @@ class EpisodeStore:
         if any(current.timestamp_ms < previous.timestamp_ms for previous, current in zip(action_tuple, action_tuple[1:])):
             raise ValueError("actions must be sorted by timestamp")
 
+        self.episodes_dir.mkdir(parents=True, exist_ok=True)
         destination = self.episode_dir(manifest.episode_id)
-        destination.mkdir(parents=True, exist_ok=True)
-        write_episode_manifest(destination / "manifest.json", manifest)
-        write_actions_jsonl(destination / "actions.jsonl", action_tuple)
-        _atomic_json(destination / "frame_timestamps.json", {"timestamps_ms": timestamps})
-        if audit is not None:
-            _atomic_json(destination / "audit.json", dict(audit))
+        if destination.exists():
+            raise FileExistsError(f"episode already exists: {destination}")
+
+        # Build the complete episode beside its final location. Directory rename is
+        # atomic on the same filesystem, so an interrupted ingest never publishes a
+        # manifest without its actions and frame timestamps.
+        with tempfile.TemporaryDirectory(
+            prefix=f".{manifest.episode_id}.", dir=self.episodes_dir
+        ) as temporary:
+            staging = Path(temporary)
+            write_episode_manifest(staging / "manifest.json", manifest)
+            write_actions_jsonl(staging / "actions.jsonl", action_tuple)
+            _atomic_json(staging / "frame_timestamps.json", {"timestamps_ms": timestamps})
+            if audit is not None:
+                _atomic_json(staging / "audit.json", dict(audit))
+            staging.replace(destination)
         return destination
 
     def read_episode(self, episode_id: str) -> StoredEpisode:

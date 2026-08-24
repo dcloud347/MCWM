@@ -32,6 +32,22 @@ class EpisodeStoreTest(unittest.TestCase):
             self.assertEqual(report["issues"], [])
             self.assertGreater(report["noop_count"], 0)
 
+    def test_existing_episode_is_not_partially_overwritten(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = build_fixture_store(Path(temporary))
+            episode = store.read_episode("fixture-vpt")
+            with self.assertRaises(FileExistsError):
+                store.write_episode(
+                    episode.manifest,
+                    episode.frame_timestamps_ms,
+                    episode.actions,
+                    audit=episode.audit,
+                )
+            self.assertEqual(
+                store.read_episode("fixture-vpt").frame_timestamps_ms,
+                episode.frame_timestamps_ms,
+            )
+
     def test_parquet_dependency_error_is_clear(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = build_fixture_store(Path(temporary))
@@ -41,4 +57,3 @@ class EpisodeStoreTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
