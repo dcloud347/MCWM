@@ -1,0 +1,8 @@
+schema_version: 1
+source: minerl
+minerl_version: "1.0"
+minecraft_version: "1.16.5"
+resolution: [640, 360]
+preserve_noop: true
+max_frame_gap_ms: 250
+

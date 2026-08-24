@@ -16,9 +16,20 @@ parquet = ["pyarrow>=12"]
 overlay = ["numpy>=1.24", "opencv-python>=4.8"]
 video = ["av>=10"]
 test = ["pytest>=7"]
+train = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "av>=10",
+    "PyYAML>=6",
+    "wandb>=0.16",
+    "Pillow>=9",
+    "safetensors>=0.4",
+    "webdataset>=0.2.86",
+]
 
 [project.scripts]
 mcwm-audit-data = "mcwm.data.audit:main"
+mcwm-pretrain-visual = "mcwm.training.pretrain_visual:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

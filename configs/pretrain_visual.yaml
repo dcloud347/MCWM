@@ -1,0 +1,80 @@
+seed: 2026
+# 正式训练要求 CUDA；单卡时不会额外套 FSDP wrapper。
+device: cuda
+precision: bf16
+output_dir: artifacts/m1-visual-base
+data:
+  # 指向 M0 prepare_vpt/prepare_minerl1 生成的 canonical dataset。
+  root: data/canonical
+  train_split: train
+  validation_split: validation
+  clip_frames: 16
+  clip_stride: 4
+  batch_size: 1
+  workers: 8
+  source_balanced: true
+model:
+  # 640×360 用 20×20 patch，得到 18×32=576 个 patch token。
+  image_height: 360
+  image_width: 640
+  patch_size: 20
+  encoder_dim: 768
+  encoder_depth: 12
+  encoder_heads: 12
+  encoder_mlp_dim: 3072
+  predictor_dim: 384
+  predictor_depth: 8
+  predictor_heads: 6
+  predictor_mlp_dim: 768
+  gradient_checkpointing: true
+mask:
+  # True 的 patch 不给 online encoder 看，并作为 predictor 的目标。
+  ratio: 0.75
+  spatial_blocks: 4
+  temporal_tubes: 4
+augmentation:
+  # 只增强 online 分支；同一 clip 的所有帧共用颜色变换。
+  enabled: true
+  brightness: 0.10
+  gamma: 0.10
+  color: 0.05
+optimizer:
+  # effective batch 通过每卡 batch × GPU 数 × accumulation 得到。
+  learning_rate: 0.0001
+  weight_decay: 0.05
+  gradient_clip: 1.0
+  effective_batch_size: 64
+  max_steps: 100000
+  warmup_steps: 5000
+  ema_start: 0.996
+  ema_end: 1.0
+validation:
+  # 连续多次 collapse 才中止，避免单个异常 validation 误报。
+  every_steps: 1000
+  batches: 32
+  collapse_check: true
+collapse:
+  minimum_average_std: 0.01
+  minimum_effective_rank: 16.0
+  maximum_pairwise_cosine: 0.999
+  patience_validations: 3
+checkpoint:
+  # resume 时会校验数据 manifest hash 和关键训练配置。
+  every_steps: 1000
+  keep_last: 3
+  resume: null
+distributed:
+  # torchrun 多进程时启用；单进程自动使用普通 nn.Module。
+  strategy: fsdp
+wandb:
+  # API key 由 wandb login 或训练环境 secret 提供，不写入本文件。
+  enabled: true
+  mode: online
+  entity: null
+  project: mcwm
+  group: m1-visual
+  name: null
+  tags: [vpt, minerl1, from-scratch, m1]
+  log_every_steps: 10
+  diagnostics_every_steps: 200
+  log_checkpoints: false

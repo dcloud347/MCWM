@@ -1,0 +1,13 @@
+schema_version: 1
+sources:
+  - vpt
+  - minerl
+resolution: [640, 360]
+split_ratios:
+  train: 0.90
+  validation: 0.05
+  test: 0.05
+split_group_keys: [session_id, world_id]
+preserve_noop: true
+max_frame_gap_ms: 250
+

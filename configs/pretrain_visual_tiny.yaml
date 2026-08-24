@@ -1,0 +1,71 @@
+# 只用于本地单元测试和单 batch overfit；正式训练使用 pretrain_visual.yaml。
+seed: 2026
+device: cpu
+precision: fp32
+output_dir: /tmp/mcwm-m1-tiny
+data:
+  root: /tmp/mcwm-fixture
+  train_split: train
+  validation_split: validation
+  clip_frames: 4
+  clip_stride: 1
+  batch_size: 2
+  workers: 0
+  source_balanced: false
+model:
+  image_height: 40
+  image_width: 40
+  patch_size: 10
+  encoder_dim: 48
+  encoder_depth: 2
+  encoder_heads: 4
+  encoder_mlp_dim: 96
+  predictor_dim: 32
+  predictor_depth: 2
+  predictor_heads: 4
+  predictor_mlp_dim: 64
+  gradient_checkpointing: false
+mask:
+  ratio: 0.5
+  spatial_blocks: 1
+  temporal_tubes: 1
+augmentation:
+  enabled: false
+  brightness: 0.0
+  gamma: 0.0
+  color: 0.0
+optimizer:
+  learning_rate: 0.001
+  weight_decay: 0.0
+  gradient_clip: 1.0
+  effective_batch_size: 2
+  max_steps: 20
+  warmup_steps: 2
+  ema_start: 0.9
+  ema_end: 0.99
+validation:
+  every_steps: 10
+  batches: 1
+  collapse_check: false
+collapse:
+  minimum_average_std: 0.01
+  minimum_effective_rank: 4.0
+  maximum_pairwise_cosine: 0.999
+  patience_validations: 3
+checkpoint:
+  every_steps: 10
+  keep_last: 2
+  resume: null
+distributed:
+  strategy: none
+wandb:
+  enabled: false
+  mode: disabled
+  entity: null
+  project: mcwm
+  group: m1-visual-tiny
+  name: null
+  tags: [tiny, m1]
+  log_every_steps: 1
+  diagnostics_every_steps: 5
+  log_checkpoints: false

@@ -119,6 +119,7 @@ VPT 仓库只允许用于理解数据格式、动作语义和 MineRL 1.0 环境�
 - 随机种子
 - 数据 manifest hash
 - parent checkpoint ID
+- W&B entity、project、run ID 和 run name
 - `external_pretrained=false`
 
 加载 checkpoint 时若缺失 provenance 或发现外部权重标记，训练入口直接报错。本项目不提供加载外部预训练权重的配置开关。
@@ -288,6 +289,8 @@ EMA momentum 采用 cosine schedule，初始 `0.996`，最终逐步接近 `1.0`�
 640x360 是不可降级的模型输入契约。为控制显存，训练实现默认启用 bf16、scaled-dot-product/Flash Attention、activation checkpointing、FSDP/ZeRO 和 gradient accumulation，而不是降低输入分辨率。
 
 训练结束时保留 EMA visual encoder；阶段 A predictor 不直接用于阶段 B，防止把“补 masked token”和“动作条件未来预测”混成一个不可解释模块。
+
+M1 默认配置实现后的实际参数量为：单份 visual encoder `86,423,040`，masked-video predictor `19,761,408`，阶段 A 可梯度参数 `106,184,448`，包含 online/EMA 两份 encoder 的 checkpoint 总参数 `192,607,488`。这些数值由 meta-tensor 参数预算测试锁定，不依赖近似估算。
 
 ### 5.3 Action encoder
 
@@ -472,6 +475,59 @@ L_pred = Σ_h∈{1,2,4,8} w_h ‖ẑ(t+h) − z_target(t+h)‖₂²
 9. 离线 goal-reaching planning smoke test。
 10. MineRL 1.0 在线 MPC smoke test。
 
+### 6.6 Weights & Biases 训练监控
+
+正式的阶段 A、B0、B1 和 B2 训练统一使用 Weights & Biases（W&B）记录实验。训练入口默认启用 W&B；单元测试、CI 和本地快速 smoke test 可显式设置 `wandb.mode=disabled`，无网络但仍需保留日志时使用 `wandb.mode=offline`，之后再执行 `wandb sync`。禁止因为 W&B 暂时不可用而丢失本地 checkpoint 或中断已开始的训练，核心标量同时写入本地 JSONL 日志。
+
+每个 run 开始时记录：
+
+- 完整 resolved config、git commit、随机种子和数据 manifest hash。
+- 当前 milestone、数据来源、训练/验证 split 和 `external_pretrained=false`。
+- 模型各模块的参数量、可训练参数量和最终推理参数量。
+- 分布式 world size、每卡 batch、梯度累积步数、有效 batch、precision 和设备信息。
+- parent checkpoint、W&B run ID，以及是否从 checkpoint resume。
+
+每个 optimizer step 记录以下训练状态；高开销诊断按较低频率记录，频率全部由配置控制：
+
+- total loss 与各项 loss，例如 visual prediction loss、world-model prediction loss 和 SIGReg。
+- learning rate、EMA momentum、gradient norm、parameter norm 和 AMP loss scale。
+- samples/second、tokens/second、data loading time、step time、显存使用量和累计训练时长。
+- mask ratio、spatial/temporal mask 统计，以及各数据来源在当前 batch 中的占比。
+- latent mean/std、effective rank、pairwise cosine、covariance off-diagonal norm 和 online/EMA cosine gap。
+
+每次 validation 记录 validation loss、collapse diagnostics、linear probe、action sensitivity 和多步 rollout 指标中当前阶段适用的部分。可视化采用固定 validation sample ID，以便跨 run 比较：
+
+- 阶段 A：原始 clip、mask 图和按 token 聚合的 prediction-error heatmap。
+- 阶段 B：真实/shuffled/no-op 动作误差对比、rollout error 曲线和 surprise 曲线。
+
+W&B artifact 只保存小型可追溯产物：resolved config、数据 audit 报告、评估汇总和版本化 checkpoint。原始 VPT/MineRL 视频、完整 action 文件和包含隐私信息的本地路径不得上传。大型 checkpoint 是否上传由 `wandb.log_checkpoints` 控制；无论是否上传，checkpoint 都先原子写入本地目录。
+
+断点恢复规则：
+
+1. checkpoint 中保存 W&B run ID 和最后完成的 optimizer step。
+2. 同一次训练恢复时用该 run ID 继续写入，不能创建一个看似全新的 run。
+3. 改变数据 manifest、模型结构或关键训练目标时必须创建新 run，并通过 `parent_checkpoint` 关联来源。
+4. W&B 中的 step 必须等于 optimizer step；gradient accumulation 的 micro-step 不递增全局 step，也不触发 EMA 更新。
+
+建议配置结构：
+
+```yaml
+wandb:
+  enabled: true
+  mode: online             # online | offline | disabled
+  entity: null             # 由命令行、环境变量或私有本地配置提供
+  project: mcwm
+  group: m1-visual
+  name: null               # 默认由 milestone、时间和短 git SHA 生成
+  tags: [vpt, minerl1, from-scratch]
+  log_every_steps: 10
+  diagnostics_every_steps: 200
+  validation_every_steps: 1000
+  log_checkpoints: false
+```
+
+API key 不写入仓库、配置、checkpoint 或日志；通过 `wandb login` 或运行环境的 secret 注入。多 GPU 训练只允许 rank 0 初始化和写入 W&B，其他 rank 仅参与指标归约。
+
 ## 7. 诊断与验证
 
 Benchmark 暂缓不等于不做验证。没有下面这些诊断，world model 是否学到动作因果关系无法判断。
@@ -609,6 +665,7 @@ MCWM/
 │   │   └── world_model.py
 │   ├── training/
 │   │   ├── ema.py
+│   │   ├── logging.py
 │   │   ├── pretrain_visual.py
 │   │   ├── train_world_model.py
 │   │   └── checkpoint.py
@@ -690,9 +747,10 @@ MCWM/
 - 实现 ViT online/EMA encoders。
 - 实现 masked spatiotemporal sampling 和 visual predictor。
 - 完成小数据 overfit、collapse diagnostics 和 checkpoint resume。
+- 接入 W&B，记录 loss、EMA、吞吐、显存、collapse diagnostics 和固定样本可视化。
 - 在混合 VPT/MineRL 1.0 视频上训练首个 visual checkpoint。
 
-完成条件：无 collapse，validation loss 与 probe 指标优于随机 encoder。
+完成条件：无 collapse，validation loss 与 probe 指标优于随机 encoder；W&B run 可从 checkpoint 无缝恢复且 provenance 完整。
 
 ### M2：动作条件 world model
 
