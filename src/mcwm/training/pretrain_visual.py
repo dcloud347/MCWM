@@ -978,15 +978,15 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                     _prune_checkpoints(
                         output_dir, int(config["checkpoint"].get("keep_last", 0))
                     )
-        checkpoint_exists = last_checkpoint.exists() if rank == 0 else False
+        final_checkpoint = output_dir / f"checkpoint-{optimizer_step:08d}.pt"
+        checkpoint_exists = final_checkpoint.exists() if rank == 0 else False
         if world_size > 1:
             state = [checkpoint_exists]
             torch.distributed.broadcast_object_list(state, src=0)
             checkpoint_exists = bool(state[0])
         if not checkpoint_exists:
-            last_checkpoint = output_dir / f"checkpoint-{optimizer_step:08d}.pt"
             _save_checkpoint(
-                last_checkpoint,
+                final_checkpoint,
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
@@ -998,6 +998,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                 world_size=world_size,
                 training_state={"collapse_bad_validations": collapse_bad_validations},
             )
+        last_checkpoint = final_checkpoint
     finally:
         logger.finish()
         if world_size > 1:

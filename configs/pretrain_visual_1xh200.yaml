@@ -1,8 +1,8 @@
-# M1 正式训练配置：固定用于单机 2 张 H100（由 torchrun 启动 2 个进程）。
+# M1 正式训练配置：单机 1 张 H200，直接用 python 启动，不需要 torchrun。
 seed: 2026
 device: cuda
 precision: bf16
-output_dir: artifacts/m1-visual-base-2xh100
+output_dir: artifacts/m1-visual-base-1xh200
 data:
   # 必须是 M0 生成并审计通过的 640x360 canonical dataset。
   root: data/canonical
@@ -10,10 +10,10 @@ data:
   validation_split: validation
   clip_frames: 16
   clip_stride: 8
-  # 每张 H100 一次处理 4 个 clip；两张卡的 global micro-batch 是 8。
-  batch_size: 4
-  # workers 是每个训练进程的数量，因此整机最多会有 16 个解码 worker。
-  workers: 8
+  # H200 141GB 显存的保守起点；若实测 OOM，降为 4。
+  batch_size: 8
+  # PyAV 当前在 CPU 上按 PTS 解码；按训练机 CPU 核数酌情调整。
+  workers: 12
   source_balanced: true
 model:
   # 640x360 使用 20x20 patch，每帧得到 18x32=576 个 patch token。
@@ -44,9 +44,9 @@ optimizer:
   learning_rate: 0.0001
   weight_decay: 0.05
   gradient_clip: 1.0
-  # 4 clips/GPU x 2 GPUs x 8 accumulation steps = 64 clips。
+  # 8 clips/micro-step x 8 accumulation steps = 64 clips/optimizer step。
   effective_batch_size: 64
-  # 7,812 steps x effective batch 64 = 499,968 training clips.
+  # 7,812 steps x 64 = 499,968 training clips。
   max_steps: 7812
   warmup_steps: 400
   ema_start: 0.996
@@ -61,21 +61,20 @@ collapse:
   maximum_pairwise_cosine: 0.999
   patience_validations: 3
 checkpoint:
-  # 每 1000 step 保存一次，只保留最近 3 份常规 checkpoint。
   every_steps: 1000
   keep_last: 3
   resume: null
 distributed:
-  # 必须用 torchrun --nproc-per-node=2；每个进程绑定一张 H100。
-  strategy: fsdp
+  # 单卡不需要 DDP/FSDP；避免不必要的 wrapper 和通信路径。
+  strategy: none
 wandb:
   enabled: true
   mode: online
   entity: null
   project: mcwm
-  group: m1-visual-2xh100
+  group: m1-visual-1xh200
   name: null
-  tags: [vpt, minerl1, from-scratch, m1, 2xh100]
+  tags: [vpt, minerl1, from-scratch, m1, 1xh200]
   log_every_steps: 10
   diagnostics_every_steps: 200
   log_checkpoints: false

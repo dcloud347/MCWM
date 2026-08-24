@@ -9,7 +9,7 @@ data:
   train_split: train
   validation_split: validation
   clip_frames: 16
-  clip_stride: 4
+  clip_stride: 8
   batch_size: 1
   workers: 8
   source_balanced: true
@@ -44,8 +44,9 @@ optimizer:
   weight_decay: 0.05
   gradient_clip: 1.0
   effective_batch_size: 64
-  max_steps: 100000
-  warmup_steps: 5000
+  # 7,812 steps x effective batch 64 = 499,968 training clips.
+  max_steps: 7812
+  warmup_steps: 400
   ema_start: 0.996
   ema_end: 1.0
 validation:
