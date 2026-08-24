@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcwm"
+version = "0.1.0"
+description = "Minecraft action-conditioned joint-embedding world model"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+parquet = ["pyarrow>=12"]
+overlay = ["numpy>=1.24", "opencv-python>=4.8"]
+video = ["av>=10"]
+test = ["pytest>=7"]
+
+[project.scripts]
+mcwm-audit-data = "mcwm.data.audit:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

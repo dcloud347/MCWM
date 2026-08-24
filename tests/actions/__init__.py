@@ -1,0 +1,2 @@
+"""Action contract tests."""
+
