@@ -1,0 +1,80 @@
+# M1 正式训练配置：固定用于单机 2 张 H100（由 torchrun 启动 2 个进程）。
+seed: 2026
+device: cuda
+precision: bf16
+output_dir: artifacts/m1-visual-base-2xh100
+data:
+  # 必须是 M0 生成并审计通过的 640x360 canonical dataset。
+  root: data/canonical
+  train_split: train
+  validation_split: validation
+  clip_frames: 16
+  clip_stride: 4
+  # 每张 H100 一次处理 4 个 clip；两张卡的 global micro-batch 是 8。
+  batch_size: 4
+  # workers 是每个训练进程的数量，因此整机最多会有 16 个解码 worker。
+  workers: 8
+  source_balanced: true
+model:
+  # 640x360 使用 20x20 patch，每帧得到 18x32=576 个 patch token。
+  image_height: 360
+  image_width: 640
+  patch_size: 20
+  encoder_dim: 768
+  encoder_depth: 12
+  encoder_heads: 12
+  encoder_mlp_dim: 3072
+  predictor_dim: 384
+  predictor_depth: 8
+  predictor_heads: 6
+  predictor_mlp_dim: 768
+  gradient_checkpointing: true
+mask:
+  # True 表示 online encoder 看不到、predictor 需要预测的 patch。
+  ratio: 0.75
+  spatial_blocks: 4
+  temporal_tubes: 4
+augmentation:
+  # 只增强 online 分支；同一个 clip 的所有帧共用颜色变换。
+  enabled: true
+  brightness: 0.10
+  gamma: 0.10
+  color: 0.05
+optimizer:
+  learning_rate: 0.0001
+  weight_decay: 0.05
+  gradient_clip: 1.0
+  # 4 clips/GPU x 2 GPUs x 8 accumulation steps = 64 clips。
+  effective_batch_size: 64
+  max_steps: 100000
+  warmup_steps: 5000
+  ema_start: 0.996
+  ema_end: 1.0
+validation:
+  every_steps: 1000
+  batches: 32
+  collapse_check: true
+collapse:
+  minimum_average_std: 0.01
+  minimum_effective_rank: 16.0
+  maximum_pairwise_cosine: 0.999
+  patience_validations: 3
+checkpoint:
+  # 每 1000 step 保存一次，只保留最近 3 份常规 checkpoint。
+  every_steps: 1000
+  keep_last: 3
+  resume: null
+distributed:
+  # 必须用 torchrun --nproc-per-node=2；每个进程绑定一张 H100。
+  strategy: fsdp
+wandb:
+  enabled: true
+  mode: online
+  entity: null
+  project: mcwm
+  group: m1-visual-2xh100
+  name: null
+  tags: [vpt, minerl1, from-scratch, m1, 2xh100]
+  log_every_steps: 10
+  diagnostics_every_steps: 200
+  log_checkpoints: false

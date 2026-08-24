@@ -33,17 +33,21 @@ For real MP4 ingestion, install `mcwm[video]`; `prepare_vpt.py` and
 
 ## M1 visual pretraining
 
-Log in to W&B once on the training host, then start the CUDA configuration:
+Log in to W&B once on the training host. For one machine with two H100 GPUs,
+use the dedicated configuration:
 
 ```bash
 wandb login
-torchrun --standalone --nproc-per-node=8 -m mcwm.training.pretrain_visual \
-  --config configs/pretrain_visual.yaml \
+torchrun --standalone --nproc-per-node=2 -m mcwm.training.pretrain_visual \
+  --config configs/pretrain_visual_2xh100.yaml \
   --data-root /path/to/canonical-dataset \
-  --output-dir /path/to/checkpoints/m1-visual
+  --output-dir /path/to/checkpoints/m1-visual-2xh100
 ```
 
-`configs/pretrain_visual.yaml` keeps the formal 640x360 input, 16-frame clips,
+The two-H100 configuration uses a per-GPU batch of 4 and eight gradient
+accumulation steps, giving an effective batch of 64 clips. The generic
+`configs/pretrain_visual.yaml` remains available for other GPU counts.
+Both configurations keep the formal 640x360 input, 16-frame clips,
 ViT-Base encoder, bf16, activation checkpointing, FSDP, EMA, and W&B logging.
 The checked parameter counts are 86,423,040 per visual encoder and 19,761,408
 for the M1 predictor (192,607,488 parameters saved during phase A).
