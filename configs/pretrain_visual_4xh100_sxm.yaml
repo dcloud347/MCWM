@@ -56,11 +56,11 @@ optimizer:
   gradient_clip: 1.0
   # 8 clips/GPU x 4 GPUs x 2 accumulation steps = 64 clips。
   effective_batch_size: 64
-  # 总 optimizer steps = iterations_per_epoch x epochs = 18,000。
+  # 总 optimizer steps = iterations_per_epoch x epochs = 45,000。
   iterations_per_epoch: 300
-  epochs: 60
+  epochs: 150
   # 保持原 100/7,500 的 warmup 比例。
-  warmup_steps: 240
+  warmup_steps: 600
   ema_start: 0.999
   ema_end: 0.999
 validation:

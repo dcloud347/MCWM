@@ -55,8 +55,8 @@ checkpointing, FSDP, EMA, and W&B logging.
 Masking follows the V-JEPA 2 two-group setup: one prediction task unions eight
 15% full-duration spatial blocks, the other unions two 70% full-duration
 blocks, and their per-sample losses are averaged equally.
-Formal training uses 300 optimizer iterations per epoch and defaults to 60
-epochs (18,000 steps), with 240 warmup steps.
+Formal training uses 300 optimizer iterations per epoch and defaults to 150
+epochs (45,000 steps), with 600 warmup steps.
 The checked parameter counts are 86,899,968 per visual encoder and 21,886,080
 for the M1 predictor (195,686,016 parameters saved during phase A).
 With one CUDA process the same configuration automatically runs without a
