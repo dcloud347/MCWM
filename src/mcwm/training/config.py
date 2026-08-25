@@ -130,7 +130,11 @@ def validate_pretrain_config(config: Mapping[str, Any]) -> None:
         config["checkpoint"].get("every_steps", 1000),
     )
     if any(int(value) <= 0 for value in positive_intervals):
-        raise ValueError("logging, diagnostics, validation and checkpoint intervals must be positive")
+        raise ValueError(
+            "logging, diagnostics, validation and checkpoint intervals must be positive"
+        )
+    if int(config["validation"].get("clips_per_video", 1)) <= 0:
+        raise ValueError("validation.clips_per_video must be positive")
 
 
 def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:

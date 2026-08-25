@@ -108,6 +108,7 @@ class CanonicalVisualDataset(Dataset):
         clip_frames: int,
         sample_fps: int,
         seed: int = 0,
+        clips_per_video: int = 1,
         include_probe_labels: bool = False,
         max_frame_gap_ms: int = 250,
     ) -> None:
@@ -115,12 +116,15 @@ class CanonicalVisualDataset(Dataset):
         self.clip_frames = int(clip_frames)
         self.sample_fps = int(sample_fps)
         self.seed = int(seed)
+        self.clips_per_video = int(clips_per_video)
         self.include_probe_labels = bool(include_probe_labels)
         self.max_frame_gap_ms = int(max_frame_gap_ms)
         if self.clip_frames < 2:
             raise ValueError("clip_frames must be at least two")
         if self.sample_fps <= 0:
             raise ValueError("sample_fps must be positive")
+        if self.clips_per_video <= 0:
+            raise ValueError("clips_per_video must be positive")
         manifest = DatasetManifest.read(self.root / "dataset_manifest.json")
         store = EpisodeStore(self.root)
         references: List[VisualEpisodeRef] = []
@@ -150,14 +154,15 @@ class CanonicalVisualDataset(Dataset):
         self.references = tuple(references)
 
     def __len__(self) -> int:
-        return len(self.references)
+        return len(self.references) * self.clips_per_video
 
     def __getitem__(self, index: SampleIndex) -> Dict[str, object]:
         if isinstance(index, tuple):
-            episode_index, clip_seed = index
+            sample_index, clip_seed = index
         else:
-            episode_index = int(index)
-            clip_seed = self.seed + episode_index
+            sample_index = int(index)
+            clip_seed = self.seed + sample_index
+        episode_index = sample_index // self.clips_per_video
         reference = self.references[episode_index]
         frame_indices = random_clip_frame_indices_from_ranges(
             reference.frame_timestamps_ms,

@@ -624,6 +624,7 @@ def _make_loaders(
             clip_frames=int(data["clip_frames"]),
             sample_fps=int(data["sample_fps"]),
             seed=seed + 10000,
+            clips_per_video=int(config["validation"].get("clips_per_video", 1)),
         )
 
     train_sampler = None

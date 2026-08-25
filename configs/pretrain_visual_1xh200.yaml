@@ -66,6 +66,8 @@ optimizer:
 validation:
   # 每 1,800 step（6 个 epoch）验证一次。
   every_steps: 1800
+  # 每个 validation 视频使用 8 个固定、可复现的 clip，提高统计稳定性。
+  clips_per_video: 8
   batches: 32
   collapse_check: true
 collapse:
