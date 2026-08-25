@@ -1,6 +1,6 @@
 # 生成 VPT 训练数据
 
-在 Linux 训练机的仓库根目录依次执行以下命令。本流程从 OpenAI VPT 7.x contractor 数据中选择一个可复现、大小受控的子集，并生成 `data/canonical`。默认下载 1,200 段录像（最多 100 小时），可为 720GB 硬盘保留足够余量。
+在 Linux 训练机的仓库根目录依次执行以下命令。本流程从 OpenAI VPT 7.x contractor 数据中选择一个可复现、大小受控的子集，并生成 `data/canonical`。默认下载 1,000 段录像（最多 100 小时），可为 720GB 硬盘保留足够余量。
 
 ## 1. 安装依赖
 
@@ -15,7 +15,7 @@ sudo apt-get update
 sudo apt-get install -y aria2 jq
 ```
 
-## 2. 选择 1,200 段官方录像
+## 2. 选择 1,000 段官方录像
 
 选中路径列表就是本次数据集的选择记录。续传时必须保持该文件不变。
 
@@ -27,13 +27,13 @@ curl -fL --retry 5 \
   -o data/vpt/vpt-7x-index.json
 
 jq -r '.relpaths[]' data/vpt/vpt-7x-index.json \
-  | shuf -n 1200 \
+  | shuf -n 1000 \
   > data/vpt/selected-relpaths.txt
 
 wc -l data/vpt/selected-relpaths.txt
 ```
 
-最后一条命令必须输出 `1200`。如需更换固定子集，只重新生成一次该文件；续传期间不要重新生成。
+最后一条命令必须输出 `1000`。如需更换固定子集，只重新生成一次该文件；续传期间不要重新生成。
 
 ## 3. 下载 MP4 和 JSONL
 
