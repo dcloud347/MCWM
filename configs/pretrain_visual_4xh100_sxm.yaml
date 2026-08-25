@@ -1,0 +1,92 @@
+# M1 正式训练配置：单机 4 张 H100 SXM 80GB（由 torchrun 启动 4 个进程）。
+seed: 2026
+device: cuda
+precision: bf16
+output_dir: artifacts/m1-visual-base-4xh100-sxm
+data:
+  # 必须是 M0 生成并审计通过的 640x360 canonical dataset。
+  root: data/canonical
+  train_split: train
+  validation_split: validation
+  # V-JEPA 原版语义：每次访问视频时随机选起点，按 PTS 采样为每秒 4 帧。
+  clip_frames: 16
+  sample_fps: 4
+  clips_per_video: 1
+  # 每张 H100 一次处理 4 个 clip；四张卡的 global micro-batch 是 16。
+  batch_size: 4
+  # workers 是每个训练进程的数量，因此整机最多会有 32 个解码 worker。
+  workers: 8
+  # 按数据源反频率有放回抽取 batch 中的视频。
+  source_balanced: true
+model:
+  # 固定 640x360 和 20x20 patch；2-frame tubelet 得到 8x18x32=4608 tokens。
+  image_height: 360
+  image_width: 640
+  patch_size: 20
+  tubelet_size: 2
+  use_rope: true
+  encoder_dim: 768
+  encoder_depth: 12
+  encoder_heads: 12
+  encoder_mlp_dim: 3072
+  predictor_dim: 384
+  predictor_depth: 12
+  predictor_heads: 12
+  predictor_mlp_dim: 1536
+  gradient_checkpointing: true
+mask:
+  # V-JEPA 2 的两套 multi-block mask；每个 block 都贯穿整个 clip。
+  - spatial_scale: [0.15, 0.15]
+    temporal_scale: [1.0, 1.0]
+    aspect_ratio: [0.75, 1.5]
+    num_blocks: 8
+  - spatial_scale: [0.70, 0.70]
+    temporal_scale: [1.0, 1.0]
+    aspect_ratio: [0.75, 1.5]
+    num_blocks: 2
+augmentation:
+  # 首轮训练关闭增强，保持 online 与 target 的像素内容一致。
+  enabled: false
+  brightness: 0.10
+  gamma: 0.10
+  color: 0.05
+optimizer:
+  learning_rate: 0.0001
+  weight_decay: 0.05
+  gradient_clip: 1.0
+  # 4 clips/GPU x 4 GPUs x 4 accumulation steps = 64 clips。
+  effective_batch_size: 64
+  # 总 optimizer steps = iterations_per_epoch x epochs = 7,500。
+  iterations_per_epoch: 300
+  epochs: 25
+  warmup_steps: 100
+  ema_start: 0.999
+  ema_end: 0.999
+validation:
+  every_steps: 300
+  batches: 32
+  collapse_check: true
+collapse:
+  minimum_average_std: 0.01
+  minimum_effective_rank: 16.0
+  maximum_pairwise_cosine: 0.999
+  patience_validations: 3
+checkpoint:
+  # 每 300 step 保存一次，只保留最近 3 份常规 checkpoint。
+  every_steps: 300
+  keep_last: 3
+  resume: null
+distributed:
+  # 必须用 torchrun --nproc-per-node=4；每个进程绑定一张 H100。
+  strategy: fsdp
+wandb:
+  enabled: true
+  mode: online
+  entity: null
+  project: mcwm
+  group: m1-visual-4xh100-sxm
+  name: null
+  tags: [vpt, minerl1, from-scratch, m1, 4xh100, sxm]
+  log_every_steps: 10
+  diagnostics_every_steps: 200
+  log_checkpoints: false
