@@ -12,8 +12,8 @@ data:
   clip_frames: 16
   sample_fps: 4
   clips_per_video: 1
-  # H200 141GB 显存的保守起点；若实测 OOM，降为 4。
-  batch_size: 8
+  # 单张 H200 一次处理 16 个 clip。
+  batch_size: 16
   # PyAV 当前在 CPU 上按 PTS 解码；按训练机 CPU 核数酌情调整。
   workers: 12
   # 按数据源反频率有放回抽取 batch 中的视频。
@@ -33,7 +33,7 @@ model:
   predictor_depth: 12
   predictor_heads: 12
   predictor_mlp_dim: 1536
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 mask:
   # V-JEPA 2 的两套 multi-block mask；每个 block 都贯穿整个 clip。
   - spatial_scale: [0.15, 0.15]
@@ -54,7 +54,7 @@ optimizer:
   learning_rate: 0.0001
   weight_decay: 0.05
   gradient_clip: 1.0
-  # 8 clips/micro-step x 8 accumulation steps = 64 clips/optimizer step。
+  # 16 clips/micro-step x 4 accumulation steps = 64 clips/optimizer step。
   effective_batch_size: 64
   # 总 optimizer steps = iterations_per_epoch × epochs = 45,000。
   iterations_per_epoch: 300

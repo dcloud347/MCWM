@@ -12,8 +12,8 @@ data:
   clip_frames: 16
   sample_fps: 4
   clips_per_video: 1
-  # 每张 H100 一次处理 4 个 clip；两张卡的 global micro-batch 是 8。
-  batch_size: 4
+  # 每张 H100 一次处理 16 个 clip；两张卡的 global micro-batch 是 32。
+  batch_size: 16
   # workers 是每个训练进程的数量，因此整机最多会有 16 个解码 worker。
   workers: 8
   # 按数据源反频率有放回抽取 batch 中的视频。
@@ -33,7 +33,7 @@ model:
   predictor_depth: 12
   predictor_heads: 12
   predictor_mlp_dim: 1536
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 mask:
   # V-JEPA 2 的两套 multi-block mask；每个 block 都贯穿整个 clip。
   - spatial_scale: [0.15, 0.15]
@@ -54,7 +54,7 @@ optimizer:
   learning_rate: 0.0001
   weight_decay: 0.05
   gradient_clip: 1.0
-  # 4 clips/GPU x 2 GPUs x 8 accumulation steps = 64 clips。
+  # 16 clips/GPU x 2 GPUs x 2 accumulation steps = 64 clips。
   effective_batch_size: 64
   # 总 optimizer steps = iterations_per_epoch × epochs = 45,000。
   iterations_per_epoch: 300

@@ -44,14 +44,14 @@ torchrun --standalone --nproc-per-node=2 -m mcwm.training.pretrain_visual \
   --output-dir /path/to/checkpoints/m1-visual-2xh100
 ```
 
-The two-H100 configuration uses a per-GPU batch of 4 and eight gradient
+The two-H100 configuration uses a per-GPU batch of 16 and two gradient
 accumulation steps, giving an effective batch of 64 clips. The generic
 `configs/pretrain_visual.yaml` remains available for other GPU counts.
 Both configurations keep the formal 640x360 input and follow V-JEPA's video
 sampling contract: each video access chooses one random 16-frame clip and
 samples it at 4 FPS from frame timestamps. They use a Video ViT-Base encoder with
-2-frame tubelets, joint spatiotemporal attention, 3D RoPE, bf16, activation
-checkpointing, FSDP, EMA, and W&B logging.
+2-frame tubelets, joint spatiotemporal attention, 3D RoPE, bf16, FSDP, EMA, and
+W&B logging. Formal configurations disable activation checkpointing.
 Masking follows the V-JEPA 2 two-group setup: one prediction task unions eight
 15% full-duration spatial blocks, the other unions two 70% full-duration
 blocks, and their per-sample losses are averaged equally.

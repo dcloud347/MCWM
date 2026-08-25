@@ -12,7 +12,8 @@ data:
   clip_frames: 16
   sample_fps: 4
   clips_per_video: 1
-  batch_size: 1
+  # 每张 GPU 一次处理 16 个 clip；梯度累积次数由实际 GPU 数自动计算。
+  batch_size: 16
   workers: 8
   # 按数据源反频率有放回抽取 batch 中的视频。
   source_balanced: true
@@ -31,7 +32,7 @@ model:
   predictor_depth: 12
   predictor_heads: 12
   predictor_mlp_dim: 1536
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 mask:
   # V-JEPA 2：8 个 15% 小块取并集，形成第一套预测 mask。
   - spatial_scale: [0.15, 0.15]
