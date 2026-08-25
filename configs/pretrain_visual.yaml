@@ -44,8 +44,8 @@ mask:
     aspect_ratio: [0.75, 1.5]
     num_blocks: 2
 augmentation:
-  # 只增强 online 分支；同一 clip 的所有帧共用颜色变换。
-  enabled: true
+  # 首轮训练关闭增强，保持 online 与 target 的像素内容一致。
+  enabled: false
   brightness: 0.10
   gamma: 0.10
   color: 0.05
@@ -57,13 +57,13 @@ optimizer:
   effective_batch_size: 64
   # 总 optimizer steps = iterations_per_epoch × epochs。
   iterations_per_epoch: 300
-  epochs: 20
+  epochs: 25
   warmup_steps: 100
   ema_start: 0.999
   ema_end: 0.999
 validation:
-  # 连续多次 collapse 才中止，避免单个异常 validation 误报。
-  every_steps: 100
+  # 每个 epoch 验证一次；连续多次 collapse 才中止，避免单次误报。
+  every_steps: 300
   batches: 32
   collapse_check: true
 collapse:
