@@ -46,13 +46,13 @@ class AlignmentTest(unittest.TestCase):
         frame_indices = random_clip_frame_indices(
             episode.frame_timestamps_ms,
             clip_frames=3,
-            sampling_rate=1,
+            sample_fps=10,
             generator=random.Random(0),
             max_frame_gap_ms=250,
         )
         self.assertEqual(frame_indices, (0, 1, 2))
 
-    def test_vjepa_sampling_rate_uses_random_start_and_four_source_frame_step(self):
+    def test_vjepa_sampling_uses_random_start_and_four_frames_per_second(self):
         frames = tuple(range(0, 8001, 50))
         actions = tuple(noop(value) for value in range(0, 8000, 50))
         manifest = EpisodeManifest(
@@ -74,13 +74,13 @@ class AlignmentTest(unittest.TestCase):
         first = random_clip_frame_indices(
             episode.frame_timestamps_ms,
             clip_frames=16,
-            sampling_rate=4,
+            sample_fps=4,
             generator=random.Random(7),
         )
         repeated = random_clip_frame_indices(
             episode.frame_timestamps_ms,
             clip_frames=16,
-            sampling_rate=4,
+            sample_fps=4,
             generator=random.Random(7),
         )
 
@@ -88,7 +88,7 @@ class AlignmentTest(unittest.TestCase):
         self.assertEqual(len(first), 16)
         self.assertTrue(
             all(
-                current - previous == 4
+                current - previous == 5
                 for previous, current in zip(first, first[1:])
             )
         )
@@ -97,7 +97,7 @@ class AlignmentTest(unittest.TestCase):
                 frames[current] - frames[previous]
                 for previous, current in zip(first, first[1:])
             ],
-            [200] * 15,
+            [250] * 15,
         )
 
 

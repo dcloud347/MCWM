@@ -8,7 +8,7 @@ data:
   train_split: train
   validation_split: validation
   clip_frames: 4
-  sampling_rate: 4
+  sample_fps: 4
   clips_per_video: 1
   batch_size: 2
   workers: 0
@@ -17,6 +17,8 @@ model:
   image_height: 40
   image_width: 40
   patch_size: 10
+  tubelet_size: 2
+  use_rope: true
   encoder_dim: 48
   encoder_depth: 2
   encoder_heads: 4

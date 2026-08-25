@@ -31,7 +31,7 @@ class VisualEpisodeRef:
     episode_id: str
     video_path: Path
     frame_timestamps_ms: Tuple[int, ...]
-    clip_start_ranges: Tuple[Tuple[int, int], ...]
+    clip_start_ranges: Tuple[Tuple[int, int, int], ...]
     source: str
 
 
@@ -106,21 +106,21 @@ class CanonicalVisualDataset(Dataset):
         *,
         split: str,
         clip_frames: int,
-        sampling_rate: int,
+        sample_fps: int,
         seed: int = 0,
         include_probe_labels: bool = False,
         max_frame_gap_ms: int = 250,
     ) -> None:
         self.root = Path(root)
         self.clip_frames = int(clip_frames)
-        self.sampling_rate = int(sampling_rate)
+        self.sample_fps = int(sample_fps)
         self.seed = int(seed)
         self.include_probe_labels = bool(include_probe_labels)
         self.max_frame_gap_ms = int(max_frame_gap_ms)
         if self.clip_frames < 2:
             raise ValueError("clip_frames must be at least two")
-        if self.sampling_rate <= 0:
-            raise ValueError("sampling_rate must be positive")
+        if self.sample_fps <= 0:
+            raise ValueError("sample_fps must be positive")
         manifest = DatasetManifest.read(self.root / "dataset_manifest.json")
         store = EpisodeStore(self.root)
         references: List[VisualEpisodeRef] = []
@@ -131,7 +131,7 @@ class CanonicalVisualDataset(Dataset):
             clip_start_ranges = eligible_clip_start_ranges(
                 timestamps,
                 clip_frames=self.clip_frames,
-                sampling_rate=self.sampling_rate,
+                sample_fps=self.sample_fps,
                 max_frame_gap_ms=self.max_frame_gap_ms,
             )
             if not clip_start_ranges:
@@ -160,9 +160,10 @@ class CanonicalVisualDataset(Dataset):
             clip_seed = self.seed + episode_index
         reference = self.references[episode_index]
         frame_indices = random_clip_frame_indices_from_ranges(
+            reference.frame_timestamps_ms,
             reference.clip_start_ranges,
             clip_frames=self.clip_frames,
-            sampling_rate=self.sampling_rate,
+            sample_fps=self.sample_fps,
             generator=random.Random(clip_seed),
         )
         timestamps_ms = tuple(
@@ -177,7 +178,7 @@ class CanonicalVisualDataset(Dataset):
             "frames": frames,
             "sample_id": (
                 f"{reference.episode_id}:{frame_indices[0]}-{frame_indices[-1] + 1}"
-                f"@{self.sampling_rate}"
+                f"@{self.sample_fps}fps"
             ),
             "source": reference.source,
             "scene_change": scene_change,

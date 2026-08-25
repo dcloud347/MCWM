@@ -8,9 +8,9 @@ data:
   root: data/canonical
   train_split: train
   validation_split: validation
-  # V-JEPA 原版语义：每次访问视频时随机选起点，每隔 4 个源帧取一帧。
+  # V-JEPA 原版语义：每次访问视频时随机选起点，按 PTS 采样为每秒 4 帧。
   clip_frames: 16
-  sampling_rate: 4
+  sample_fps: 4
   clips_per_video: 1
   # 每张 H100 一次处理 4 个 clip；两张卡的 global micro-batch 是 8。
   batch_size: 4
@@ -19,18 +19,20 @@ data:
   # 按数据源反频率有放回抽取 batch 中的视频。
   source_balanced: true
 model:
-  # 640x360 使用 20x20 patch，每帧得到 18x32=576 个 patch token。
+  # 固定 640x360 和 20x20 patch；2-frame tubelet 得到 8x18x32=4608 tokens。
   image_height: 360
   image_width: 640
   patch_size: 20
+  tubelet_size: 2
+  use_rope: true
   encoder_dim: 768
   encoder_depth: 12
   encoder_heads: 12
   encoder_mlp_dim: 3072
   predictor_dim: 384
-  predictor_depth: 8
-  predictor_heads: 6
-  predictor_mlp_dim: 768
+  predictor_depth: 12
+  predictor_heads: 12
+  predictor_mlp_dim: 1536
   gradient_checkpointing: true
 mask:
   # V-JEPA 2 的两套 multi-block mask；每个 block 都贯穿整个 clip。

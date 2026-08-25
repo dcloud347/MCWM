@@ -2,7 +2,7 @@
 
 Minecraft joint-embedding world model trained from VPT contractor and MineRL 1.0 data.
 
-The repository contains the M0 data contracts and the M1 visual-pretraining implementation. M1 uses a from-scratch 2D ViT, an EMA target encoder with stop-gradient, structured video masks, and a factorized spatial-temporal predictor. No pretrained model weights are loaded.
+The repository contains the M0 data contracts and the M1 visual-pretraining implementation. M1 uses a from-scratch tubelet Video ViT, an EMA target encoder with stop-gradient, structured video masks, and a joint spatiotemporal predictor. No pretrained model weights are loaded.
 
 ## Requirements
 
@@ -49,15 +49,16 @@ accumulation steps, giving an effective batch of 64 clips. The generic
 `configs/pretrain_visual.yaml` remains available for other GPU counts.
 Both configurations keep the formal 640x360 input and follow V-JEPA's video
 sampling contract: each video access chooses one random 16-frame clip and
-keeps every fourth source frame. They use a
-ViT-Base encoder, bf16, activation checkpointing, FSDP, EMA, and W&B logging.
+samples it at 4 FPS from frame timestamps. They use a Video ViT-Base encoder with
+2-frame tubelets, joint spatiotemporal attention, 3D RoPE, bf16, activation
+checkpointing, FSDP, EMA, and W&B logging.
 Masking follows the V-JEPA 2 two-group setup: one prediction task unions eight
 15% full-duration spatial blocks, the other unions two 70% full-duration
 blocks, and their per-sample losses are averaged equally.
 Formal training uses 300 optimizer iterations per epoch and defaults to 20
 epochs (6,000 steps).
-The checked parameter counts are 86,423,040 per visual encoder and 19,761,408
-for the M1 predictor (192,607,488 parameters saved during phase A).
+The checked parameter counts are 86,899,968 per visual encoder and 21,886,080
+for the M1 predictor (195,686,016 parameters saved during phase A).
 With one CUDA process the same configuration automatically runs without a
 distributed wrapper. Use `wandb.mode=offline` in the YAML on a host without
 network access, or pass `--wandb-mode offline`, then sync that run later.

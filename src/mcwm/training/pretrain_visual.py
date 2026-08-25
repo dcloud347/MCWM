@@ -456,6 +456,20 @@ def _gather_equal_shape(tensor: Tensor) -> Tensor:
     return torch.cat(gathered, dim=0)
 
 
+def _grouped_online_target_gap(output: Mapping[str, Any]) -> float:
+    """比较每套 mask 的可见 online token 与相同位置的完整 EMA target。"""
+
+    target = output["target"].flatten(1, 2)
+    gaps = []
+    for online, indices in zip(output["online"], output["context_indices"]):
+        target_values = target.gather(
+            1,
+            indices.unsqueeze(-1).expand(-1, -1, target.shape[-1]),
+        )
+        gaps.append(online_target_gap(online, target_values))
+    return sum(gaps) / len(gaps)
+
+
 @torch.no_grad()
 def validate(
     model: nn.Module,
@@ -482,14 +496,14 @@ def validate(
             output = model(frames, mask_generator=mask_generator)
         losses.append(output["loss"].detach().float())
         targets.append(output["target"].mean(dim=2).detach())
-        mean_online = output["online"].mean(dim=0).mean(dim=2)
-        gaps.append(online_target_gap(mean_online, output["target"].mean(dim=2)))
+        gaps.append(_grouped_online_target_gap(output))
         if batch_index == 0:
             visuals = visual_pretraining_images(
                 frames,
                 output["target_mask"],
                 output["prediction"],
                 output["target"],
+                prediction_indices=output["prediction_indices"],
                 grid_size=_unwrapped(model).config.encoder.grid_size,
             )
     if not losses:
@@ -556,14 +570,14 @@ def _make_loaders(
             root,
             split=data.get("train_split", "train"),
             clip_frames=int(data["clip_frames"]),
-            sampling_rate=int(data["sampling_rate"]),
+            sample_fps=int(data["sample_fps"]),
             seed=seed,
         )
         validation_dataset = CanonicalVisualDataset(
             root,
             split=data.get("validation_split", "validation"),
             clip_frames=int(data["clip_frames"]),
-            sampling_rate=int(data["sampling_rate"]),
+            sample_fps=int(data["sample_fps"]),
             seed=seed + 10000,
         )
 
@@ -876,12 +890,11 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                     "system/clips_per_second": effective_batch / max(elapsed, 1e-9),
                     "system/patch_tokens_per_second": (
                         effective_batch
-                        * int(config["data"]["clip_frames"])
-                        * _unwrapped(model).config.encoder.patch_count
+                        * _unwrapped(model).config.encoder.token_count
                         / max(elapsed, 1e-9)
                     ),
                     "mask/ratio": output["target_mask"].float().mean().item(),
-                    "mask/per_frame_ratio_std": output["target_mask"]
+                    "mask/per_tubelet_ratio_std": output["target_mask"]
                     .float()
                     .mean(dim=-1)
                     .std(unbiased=False)
@@ -929,10 +942,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                         collapse_metrics(diagnostic_targets, prefix="train/latent")
                     )
                     metrics["train/online_target_cosine_gap"] = _distributed_mean(
-                        online_target_gap(
-                            output["online"].mean(dim=0).mean(dim=2),
-                            output["target"].mean(dim=2),
-                        ),
+                        _grouped_online_target_gap(output),
                         device,
                     )
                 logger.log(metrics, step=optimizer_step)

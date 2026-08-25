@@ -68,11 +68,12 @@ EMA 和 stop-gradient 默认同时启用，不把它们当作二选一。训练�
 action encoder 和 action-conditioned predictor 全部随机初始化。视觉 encoder 从阶段 A 的本项目 checkpoint 初始化；world model 训练期间继续维护 online/EMA 两份 encoder：
 
 ```text
-z(t) = E_θ(o(t))
+c_t = (o(t-15), ..., o(t))
+z(t) = pool(E_θ(c_t))
 ```
 
 ```text
-z_target(t+1) = sg(E_θ̄(o(t+1)))
+z_target(t+1) = sg(pool(E_θ̄(c_(t+1))))
 ```
 
 ```text
@@ -167,7 +168,7 @@ valid_mask:   bool[T, K]
 metadata:     episode_id, session_id, source, recorder_version
 ```
 
-`K` 是两个保留帧之间的原始动作 tick 数。视觉预训练遵循 V-JEPA 的 `sampling_rate=4`，即每隔 4 个源帧保留一帧，因此约为 `K=4`；原始逐 tick 动作始终保留，因此可以通过配置改变采样率而不用重新下载数据。
+`K` 是两个保留帧之间的原始动作 tick 数。视觉预训练遵循 V-JEPA 的 `sample_fps=4`，即按时间戳每 250 ms 保留一帧；`K` 因源视频帧率而异。原始逐 tick 动作始终保留，因此可以通过配置改变采样率而不用重新下载数据。
 
 ### 4.3 动作编码
 
@@ -258,7 +259,8 @@ o_0 --A_0--> o_1 --A_1--> ... --A_(T-1)--> o_T
 |---|---:|
 | 输入 | 640 × 360 RGB |
 | patch size | 20 |
-| spatial tokens | 32 × 18 = 576 |
+| tubelet size | 2 frames |
+| video tokens | 8 × 32 × 18 = 4608 |
 | depth | 12 |
 | heads | 12 |
 | hidden dim | 768 |
@@ -266,29 +268,31 @@ o_0 --A_0--> o_1 --A_1--> ... --A_(T-1)--> o_T
 | pooled latent dim | 768 |
 | 参数量 | 约 86M |
 
-阶段 A 需要 patch/token-level 输出用于 masked prediction。阶段 B 使用 token pooling 后的 768 维 state latent。pooling 默认用可学习 CLS token；同时保留 mean pooling 配置用于消融。
+阶段 A 需要 token-level 输出用于 masked prediction。阶段 B 对滚动 16 帧窗口的 video tokens 做 pooling，得到 768 维 state latent；首版使用 mean pooling，不额外引入 CLS token。
 
-这里的 visual encoder 始终是可独立编码单帧的共享 2D ViT：同一组参数逐帧处理视频。阶段 A 的时间关系由 masked-video predictor 建模，不把 encoder 改成只能接收固定长度 clip 的 3D/tubelet backbone。这样阶段 A 得到的 encoder 可以无结构变化地用于阶段 B 的单帧状态编码和 MineRL 在线观察。
+visual encoder 对齐 V-JEPA 2 的 Video ViT 数据流：先用 `Conv3d(kernel=stride=(2,20,20))` 生成 tubelet tokens，再让所有可见时空 token 在 encoder 内联合 self-attention。阶段 B 因此维护滚动 16 帧 observation window，而不是把 encoder 当作单帧 2D 网络。
+
+输入使用官方 ImageNet normalization：mean `(0.485, 0.456, 0.406)`、std `(0.229, 0.224, 0.225)`。
 
 online 和 EMA target encoder 结构完全相同。target encoder 参数 `requires_grad=false`，并在每次 optimizer step 后更新；不能在 micro-batch/gradient accumulation 中间更新。
 
-EMA momentum 采用 cosine schedule，初始 `0.996`，最终逐步接近 `1.0`。checkpoint 同时保存 online encoder、EMA encoder 和 momentum scheduler 状态。
+EMA momentum 固定为 `0.999`。checkpoint 同时保存 online encoder、EMA encoder 和训练调度器状态。
 
 ### 5.2 阶段 A masked-video predictor
 
 `360` 不能被 patch size 16 整除，因此首版使用 `20x20` non-overlapping patches；`640/20=32`、`360/20=18`，无需 padding 或裁剪。
 
-视觉预训练遵循 V-JEPA 的随机 clip 语义：每次访问一个视频时随机选择起点，再以 `sampling_rate=4` 保留 16 帧，不预先枚举固定 hop 窗口。先做空间 patch embedding，再使用时空 positional embedding。每个 clip 共 9216 个 patch token，因此不能直接使用一次全局时空 self-attention。
+视觉预训练遵循 V-JEPA 的随机 clip 语义：每次访问一个视频时随机选择起点，再以 `sample_fps=4` 按 PTS 保留 16 帧，不预先枚举固定 hop 窗口。2 帧 tubelet 把时间长度降为 8，因此每个 clip 有 `8×18×32=4608` 个 video tokens。encoder 和 predictor 都使用联合时空 self-attention 与 3D RoPE；CUDA 上由 PyTorch SDPA 自动选择 Flash Attention。
 
-mask 使用 V-JEPA 2 的两组 multi-block 配置。第一组把 8 个约占空间 patch 网格 15% 的矩形取并集，第二组把 2 个约占 70% 的矩形取并集；两组的 aspect ratio 都在 `[0.75, 1.5]` 内，temporal scale 固定为 `1.0`，所以每个矩形贯穿完整 16 帧。同一 clip 分别用两套 mask 构造 context，两个 masked-token prediction loss 等权平均；不把 10 个矩形合成一个 mask，也不补删随机 patch 来凑固定比例。
+mask 使用 V-JEPA 2 的两组 multi-block 配置。第一组把 8 个约占空间 patch 网格 15% 的矩形取并集，第二组把 2 个约占 70% 的矩形取并集；两组的 aspect ratio 都在 `[0.75, 1.5]` 内，temporal scale 固定为 `1.0`，所以每个矩形贯穿全部 8 个 tubelet 时间位置。同一 clip 分别用两套 mask 构造 context，两个 masked-token prediction loss 等权平均；不把 10 个矩形合成一个 mask，也不补删随机 patch 来凑固定比例。
 
-共享的 2D online encoder 逐帧编码可见 spatial context；共享的 2D EMA target encoder 逐帧编码完整 frame。阶段 A 使用一个约 20M 参数的 factorized 时空 Transformer predictor（8 层、model dim 384、6 heads）：先在每帧内部做 spatial attention，再对相同空间位置跨帧做 temporal attention。禁止对 9216 个 token 直接做全局二次复杂度 attention。
+online encoder 在 Transformer 前移除预测区域，只联合编码可见 context tokens；EMA target encoder 对完整 clip 的 4608 个 tokens 只计算一次。阶段 A predictor 对齐官方设置，使用 12 层、model dim 384、12 heads、MLP dim 1536，并为两套 mask 使用两个独立的零初始化 mask token。predictor 将 context 与 target mask tokens 按原视频位置排序后做联合时空 attention，只返回目标位置预测。
 
 640x360 是不可降级的模型输入契约。为控制显存，训练实现默认启用 bf16、scaled-dot-product/Flash Attention、activation checkpointing、FSDP/ZeRO 和 gradient accumulation，而不是降低输入分辨率。
 
 训练结束时保留 EMA visual encoder；阶段 A predictor 不直接用于阶段 B，防止把“补 masked token”和“动作条件未来预测”混成一个不可解释模块。
 
-M1 默认配置实现后的实际参数量为：单份 visual encoder `86,423,040`，masked-video predictor `19,761,408`，阶段 A 可梯度参数 `106,184,448`，包含 online/EMA 两份 encoder 的 checkpoint 总参数 `192,607,488`。这些数值由 meta-tensor 参数预算测试锁定，不依赖近似估算。
+M1 默认配置实现后的实际参数量为：单份 visual encoder `86,899,968`，masked-video predictor `21,886,080`，阶段 A 可梯度参数 `108,786,048`，包含 online/EMA 两份 encoder 的 checkpoint 总参数 `195,686,016`。这些数值由 meta-tensor 参数预算测试锁定，不依赖近似估算。
 
 ### 5.3 Action encoder
 
@@ -406,7 +410,7 @@ L = L_pred + λL_SIGReg + βL_IDM
 | effective batch | 64 clips（通过 DDP/梯度累积） |
 | warmup | 前 5% steps |
 | LR schedule | cosine |
-| EMA momentum | 0.996 → 1.0 cosine |
+| EMA momentum | 0.999 fixed |
 | clip frames | 16 |
 
 验收指标：
@@ -787,7 +791,7 @@ MCWM/
 | 第一人称部分可观测 | 相同画面对应不同世界状态 | 16-step context；后续引入 memory/hierarchy |
 | 数据来源偏差 | latent 按 recorder/source 聚类 | source-balanced sampler 和分桶验证 |
 | GUI 与世界控制混杂 | 非法规划动作 | GUI mode 显式编码、macro-action 合法性 mask |
-| 训练规模超预算 | 约 258M 推理模型、640×360 长 clip 成本过高 | 20×20 patch、factorized attention、bf16、Flash Attention、activation checkpointing、FSDP/ZeRO、sharded cache |
+| 训练规模超预算 | 约 258M 推理模型、640×360 长 clip 成本过高 | 2-frame tubelet、20×20 patch、visible-token encoder、bf16、Flash Attention、activation checkpointing、FSDP/ZeRO、sharded cache |
 
 ## 13. 实现时必须保持的原则
 

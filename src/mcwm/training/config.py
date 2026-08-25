@@ -96,13 +96,16 @@ def validate_pretrain_config(config: Mapping[str, Any]) -> None:
     if config.get("precision") not in {"fp32", "bf16", "fp16"}:
         raise ValueError("precision must be fp32, bf16 or fp16")
     data = config["data"]
-    missing_data = {"clip_frames", "sampling_rate", "clips_per_video"} - data.keys()
+    missing_data = {"clip_frames", "sample_fps", "clips_per_video"} - data.keys()
     if missing_data:
         raise ValueError(f"config data is missing fields: {sorted(missing_data)}")
     if int(data["clip_frames"]) < 2:
         raise ValueError("data.clip_frames must be at least two")
-    if int(data["sampling_rate"]) <= 0:
-        raise ValueError("data.sampling_rate must be positive")
+    if int(data["sample_fps"]) <= 0:
+        raise ValueError("data.sample_fps must be positive")
+    tubelet_size = int(config["model"].get("tubelet_size", 2))
+    if tubelet_size <= 0 or int(data["clip_frames"]) % tubelet_size:
+        raise ValueError("data.clip_frames must be divisible by model.tubelet_size")
     if int(data["clips_per_video"]) != 1:
         raise ValueError("data.clips_per_video must be one")
     _parse_mask_config(config["mask"])
@@ -140,10 +143,13 @@ def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:
         image_height=int(model["image_height"]),
         image_width=int(model["image_width"]),
         patch_size=int(model["patch_size"]),
+        clip_frames=int(data["clip_frames"]),
+        tubelet_size=int(model.get("tubelet_size", 2)),
         dim=int(model["encoder_dim"]),
         depth=int(model["encoder_depth"]),
         heads=int(model["encoder_heads"]),
         mlp_dim=int(model["encoder_mlp_dim"]),
+        use_rope=bool(model.get("use_rope", True)),
         gradient_checkpointing=bool(model.get("gradient_checkpointing", True)),
     )
     predictor = VisualPredictorConfig(
@@ -152,8 +158,9 @@ def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:
         depth=int(model["predictor_depth"]),
         heads=int(model["predictor_heads"]),
         mlp_dim=int(model["predictor_mlp_dim"]),
-        max_frames=int(data["clip_frames"]),
-        patch_count=encoder.patch_count,
+        token_grid_size=encoder.token_grid_size,
+        num_mask_tokens=len(config["mask"]),
+        use_rope=bool(model.get("use_rope", True)),
         gradient_checkpointing=bool(model.get("gradient_checkpointing", True)),
     )
     mask = _parse_mask_config(config["mask"])

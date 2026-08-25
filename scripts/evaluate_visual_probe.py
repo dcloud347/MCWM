@@ -15,6 +15,9 @@ from mcwm.models.visual_encoder import VisualEncoder
 from mcwm.training.checkpoint import read_checkpoint
 from mcwm.training.config import build_visual_jepa
 
+VJEPA_PIXEL_MEAN = (0.485, 0.456, 0.406)
+VJEPA_PIXEL_STD = (0.229, 0.224, 0.225)
+
 
 @torch.no_grad()
 def extract_features(
@@ -28,14 +31,22 @@ def extract_features(
     encoder.eval().to(device)
     features = []
     labels = {"camera_motion": [], "gui_open": [], "scene_change": []}
+    mean = torch.tensor(VJEPA_PIXEL_MEAN, device=device).view(1, 1, 3, 1, 1)
+    std = torch.tensor(VJEPA_PIXEL_STD, device=device).view(1, 1, 3, 1, 1)
     for batch_index, batch in enumerate(loader):
         if batch_index >= max_batches:
             break
         frames = batch["frames"].to(device).float().div_(255.0)
-        frames = (frames - 0.5) / 0.5
-        batch_size, clip_frames = frames.shape[:2]
-        latent = encoder(frames.flatten(0, 1)).reshape(batch_size, clip_frames, -1)
-        # 首帧、末帧和差值同时提供外观与运动信息。
+        frames = (frames - mean) / std
+        batch_size = frames.shape[0]
+        tokens = encoder(frames, return_patch_tokens=True).reshape(
+            batch_size,
+            encoder.config.temporal_grid_size,
+            encoder.config.patch_count,
+            encoder.config.dim,
+        )
+        latent = tokens.mean(dim=2)
+        # 首、末 tubelet 和差值同时提供外观与运动信息。
         features.append(torch.cat((latent[:, 0], latent[:, -1], latent[:, -1] - latent[:, 0]), 1).cpu())
         for name in labels:
             labels[name].append(batch[name].cpu())
@@ -96,7 +107,7 @@ def main() -> None:
             args.data_root,
             split=split,
             clip_frames=clip_frames,
-            sampling_rate=int(config["data"]["sampling_rate"]),
+            sample_fps=int(config["data"]["sample_fps"]),
             seed=int(config.get("seed", 2026)),
             include_probe_labels=True,
         )

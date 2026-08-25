@@ -1,8 +1,10 @@
-"""M1 专用的 factorized 空间—时间 latent predictor。"""
+"""V-JEPA 2 风格的联合时空 latent predictor。"""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import Tuple
 
 import torch
 from torch import Tensor, nn
@@ -13,89 +15,125 @@ from .layers import TransformerBlock
 
 @dataclass(frozen=True)
 class VisualPredictorConfig:
-    """predictor 配置；input_dim 同 visual encoder 的输出维度。"""
+    """Predictor 使用较窄的维度，但保留完整的联合时空 attention。"""
 
     input_dim: int = 768
     dim: int = 384
-    depth: int = 8
-    heads: int = 6
+    depth: int = 12
+    heads: int = 12
     mlp_dim: int = 1536
-    max_frames: int = 16
-    patch_count: int = 576
+    token_grid_size: Tuple[int, int, int] = (8, 18, 32)
+    num_mask_tokens: int = 2
     dropout: float = 0.0
+    use_rope: bool = True
     gradient_checkpointing: bool = True
 
     def __post_init__(self) -> None:
         if self.dim % self.heads:
             raise ValueError("predictor dim must be divisible by heads")
-        if min(self.depth, self.max_frames, self.patch_count) <= 0:
+        if min(
+            self.depth,
+            self.input_dim,
+            self.dim,
+            self.mlp_dim,
+            self.num_mask_tokens,
+            *self.token_grid_size,
+        ) <= 0:
             raise ValueError("predictor dimensions must be positive")
 
-
-class FactorizedBlock(nn.Module):
-    """先在每帧内部做空间 attention，再沿同一 patch 位置做时间 attention。"""
-
-    def __init__(self, config: VisualPredictorConfig) -> None:
-        super().__init__()
-        self.spatial = TransformerBlock(
-            config.dim, config.heads, config.mlp_dim, dropout=config.dropout
-        )
-        self.temporal = TransformerBlock(
-            config.dim, config.heads, config.mlp_dim, dropout=config.dropout
-        )
-
-    def forward(self, tokens: Tensor) -> Tensor:
-        batch, frames, patches, dim = tokens.shape
-        # 把每一帧当成独立样本，attention 长度只有 patch_count。
-        spatial = tokens.reshape(batch * frames, patches, dim)
-        spatial = self.spatial(spatial).reshape(batch, frames, patches, dim)
-        # 再把同一空间位置的 T 个 token 放在一起，attention 长度只有 frames。
-        temporal = spatial.permute(0, 2, 1, 3).reshape(batch * patches, frames, dim)
-        temporal = self.temporal(temporal)
-        return temporal.reshape(batch, patches, frames, dim).permute(0, 2, 1, 3)
+    @property
+    def token_count(self) -> int:
+        return math.prod(self.token_grid_size)
 
 
 class VisualPredictor(nn.Module):
-    """根据可见 context token 预测所有被 mask 位置的 target latent。"""
+    """把可见 context 和目标位置 mask token 合并后联合建模全部时空位置。"""
 
     def __init__(self, config: VisualPredictorConfig) -> None:
         super().__init__()
         self.config = config
         self.input_projection = nn.Linear(config.input_dim, config.dim)
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, config.dim))
-        self.spatial_position = nn.Parameter(torch.zeros(1, 1, config.patch_count, config.dim))
-        self.temporal_position = nn.Parameter(torch.zeros(1, config.max_frames, 1, config.dim))
-        self.blocks = nn.ModuleList(FactorizedBlock(config) for _ in range(config.depth))
-        self.norm = nn.LayerNorm(config.dim)
+        self.mask_tokens = nn.ParameterList(
+            nn.Parameter(torch.zeros(1, 1, config.dim))
+            for _ in range(config.num_mask_tokens)
+        )
+        rope_grid = config.token_grid_size if config.use_rope else None
+        self.blocks = nn.ModuleList(
+            TransformerBlock(
+                config.dim,
+                config.heads,
+                config.mlp_dim,
+                dropout=config.dropout,
+                rope_grid_size=rope_grid,
+            )
+            for _ in range(config.depth)
+        )
+        self.norm = nn.LayerNorm(config.dim, eps=1e-6)
         self.output_projection = nn.Linear(config.dim, config.input_dim)
+        if not config.use_rope:
+            raise ValueError("the V-JEPA 2 predictor requires 3D RoPE")
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.trunc_normal_(self.mask_token, std=0.02)
-        nn.init.trunc_normal_(self.spatial_position, std=0.02)
-        nn.init.trunc_normal_(self.temporal_position, std=0.02)
+        """官方 predictor 使用 trunc-normal 线性层和零初始化 mask token。"""
 
-    def forward(self, context_tokens: Tensor, target_mask: Tensor) -> Tensor:
-        if context_tokens.ndim != 4:
-            raise ValueError("context_tokens must have shape [B, T, N, D]")
-        batch, frames, patches, _ = context_tokens.shape
-        if target_mask.shape != (batch, frames, patches):
-            raise ValueError("target_mask must have shape [B, T, N]")
-        if frames > self.config.max_frames or patches != self.config.patch_count:
-            raise ValueError("clip dimensions do not match predictor config")
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.trunc_normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+        for token in self.mask_tokens:
+            nn.init.zeros_(token)
+        for layer_index, block in enumerate(self.blocks, start=1):
+            scale = math.sqrt(2.0 * layer_index)
+            block.attention.output.weight.data.div_(scale)
+            block.mlp[3].weight.data.div_(scale)
 
-        tokens = self.input_projection(context_tokens)
-        # target 位置再次替换成 predictor 自己的 mask token，杜绝内容泄漏。
-        tokens = torch.where(
-            target_mask.unsqueeze(-1),
-            self.mask_token.to(dtype=tokens.dtype).expand_as(tokens),
-            tokens,
+    def forward(
+        self,
+        context_tokens: Tensor,
+        context_indices: Tensor,
+        target_indices: Tensor,
+        *,
+        mask_index: int,
+    ) -> Tensor:
+        if context_tokens.ndim != 3:
+            raise ValueError("context_tokens must have shape [B, K, D]")
+        batch, context_count, input_dim = context_tokens.shape
+        if input_dim != self.config.input_dim:
+            raise ValueError("context token dimension does not match predictor input_dim")
+        if context_indices.shape != (batch, context_count):
+            raise ValueError("context_indices must have shape [B, K]")
+        if target_indices.ndim != 2 or target_indices.shape[0] != batch:
+            raise ValueError("target_indices must have shape [B, P]")
+        target_count = target_indices.shape[1]
+        if min(context_count, target_count) <= 0:
+            raise ValueError("predictor requires non-empty context and target tokens")
+
+        context = self.input_projection(context_tokens)
+        token = self.mask_tokens[mask_index % len(self.mask_tokens)].to(dtype=context.dtype)
+        targets = token.expand(batch, target_count, -1)
+        tokens = torch.cat((context, targets), dim=1)
+        position_ids = torch.cat(
+            (
+                context_indices.to(device=tokens.device, dtype=torch.long),
+                target_indices.to(device=tokens.device, dtype=torch.long),
+            ),
+            dim=1,
         )
-        tokens = tokens + self.spatial_position.to(dtype=tokens.dtype)
-        tokens = tokens + self.temporal_position[:, :frames].to(dtype=tokens.dtype)
+        # 官方 predictor 按原视频位置排序后做联合 attention，结束后恢复原拼接顺序。
+        order = torch.argsort(position_ids, dim=1)
+        position_ids = position_ids.gather(1, order)
+        tokens = tokens.gather(1, order.unsqueeze(-1).expand_as(tokens))
         for block in self.blocks:
             if self.config.gradient_checkpointing and self.training and torch.is_grad_enabled():
-                tokens = checkpoint(block, tokens, use_reentrant=False)
+                tokens = checkpoint(block, tokens, position_ids, use_reentrant=False)
             else:
-                tokens = block(tokens)
-        return self.output_projection(self.norm(tokens))
+                tokens = block(tokens, position_ids)
+        tokens = self.output_projection(self.norm(tokens))
+        reverse_order = torch.argsort(order, dim=1)
+        tokens = tokens.gather(1, reverse_order.unsqueeze(-1).expand_as(tokens))
+        return tokens[:, context_count:]
