@@ -47,8 +47,15 @@ torchrun --standalone --nproc-per-node=2 -m mcwm.training.pretrain_visual \
 The two-H100 configuration uses a per-GPU batch of 4 and eight gradient
 accumulation steps, giving an effective batch of 64 clips. The generic
 `configs/pretrain_visual.yaml` remains available for other GPU counts.
-Both configurations keep the formal 640x360 input, 16-frame clips,
+Both configurations keep the formal 640x360 input and follow V-JEPA's video
+sampling contract: each video access chooses one random 16-frame clip and
+keeps every fourth source frame. They use a
 ViT-Base encoder, bf16, activation checkpointing, FSDP, EMA, and W&B logging.
+Masking follows the V-JEPA 2 two-group setup: one prediction task unions eight
+15% full-duration spatial blocks, the other unions two 70% full-duration
+blocks, and their per-sample losses are averaged equally.
+Formal training uses 300 optimizer iterations per epoch and defaults to 20
+epochs (6,000 steps).
 The checked parameter counts are 86,423,040 per visual encoder and 19,761,408
 for the M1 predictor (192,607,488 parameters saved during phase A).
 With one CUDA process the same configuration automatically runs without a
@@ -60,8 +67,7 @@ checkpoint):
 
 ```bash
 PYTHONPATH=src python3 scripts/pretrain_visual.py \
-  --config configs/pretrain_visual_tiny.yaml \
-  --synthetic --max-steps 2
+  --config configs/pretrain_visual_tiny.yaml --synthetic
 ```
 
 Resume by passing `--resume /path/to/checkpoint.pt`. The checkpoint restores the

@@ -102,6 +102,19 @@ class EpisodeStore:
             raise ValueError(f"stored episode {episode_id} does not match its manifest")
         return StoredEpisode(manifest, timestamps, actions, audit)
 
+    def read_frame_timestamps(self, episode_id: str) -> Tuple[int, ...]:
+        """Read and validate frame PTS without loading the much larger action stream."""
+
+        source = self.episode_dir(episode_id)
+        manifest = read_episode_manifest(source / "manifest.json")
+        with (source / "frame_timestamps.json").open("r", encoding="utf-8") as handle:
+            timestamps = tuple(int(value) for value in json.load(handle)["timestamps_ms"])
+        if len(timestamps) != manifest.frame_count:
+            raise ValueError(f"stored episode {episode_id} does not match its manifest")
+        if any(current <= previous for previous, current in zip(timestamps, timestamps[1:])):
+            raise ValueError(f"stored episode {episode_id} frame timestamps are not increasing")
+        return timestamps
+
     def list_manifests(self) -> Tuple[EpisodeManifest, ...]:
         if not self.episodes_dir.exists():
             return ()

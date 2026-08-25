@@ -6,33 +6,33 @@ from collections import Counter
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import Dict, Iterator, List, Sequence, Tuple
+import random
+from typing import Dict, Iterator, List, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset, Sampler
 
-from .dataset import iter_clip_indices
+from .alignment import align_actions_to_frames
+from .dataset import (
+    eligible_clip_start_ranges,
+    random_clip_frame_indices_from_ranges,
+)
 from .episode_store import EpisodeStore
 from .manifest import DatasetManifest, EpisodeManifest
 
+SampleIndex = Union[int, Tuple[int, int]]
+
 
 @dataclass(frozen=True)
-class VisualClipRef:
-    """一个 clip 的轻量索引；真正取样时才解码视频。"""
+class VisualEpisodeRef:
+    """一个 episode 的轻量索引；每次访问时随机选择 clip。"""
 
     episode_id: str
     video_path: Path
-    start_frame: int
-    end_frame: int
     frame_timestamps_ms: Tuple[int, ...]
+    clip_start_ranges: Tuple[Tuple[int, int], ...]
     source: str
-    camera_motion: float
-    gui_open: int
-
-    @property
-    def sample_id(self) -> str:
-        return f"{self.episode_id}:{self.start_frame}-{self.end_frame}"
 
 
 def _resolve_video_path(root: Path, manifest: EpisodeManifest) -> Path:
@@ -106,85 +106,135 @@ class CanonicalVisualDataset(Dataset):
         *,
         split: str,
         clip_frames: int,
-        stride: int = 1,
+        sampling_rate: int,
+        seed: int = 0,
+        include_probe_labels: bool = False,
         max_frame_gap_ms: int = 250,
     ) -> None:
         self.root = Path(root)
         self.clip_frames = int(clip_frames)
+        self.sampling_rate = int(sampling_rate)
+        self.seed = int(seed)
+        self.include_probe_labels = bool(include_probe_labels)
+        self.max_frame_gap_ms = int(max_frame_gap_ms)
         if self.clip_frames < 2:
             raise ValueError("clip_frames must be at least two")
+        if self.sampling_rate <= 0:
+            raise ValueError("sampling_rate must be positive")
         manifest = DatasetManifest.read(self.root / "dataset_manifest.json")
         store = EpisodeStore(self.root)
-        references: List[VisualClipRef] = []
+        references: List[VisualEpisodeRef] = []
         for episode_manifest in manifest.episodes:
             if episode_manifest.split != split:
                 continue
-            episode = store.read_episode(episode_manifest.episode_id)
-            for clip in iter_clip_indices(
-                episode,
-                transitions=self.clip_frames - 1,
-                stride=stride,
-                max_frame_gap_ms=max_frame_gap_ms,
-            ):
-                references.append(
-                    VisualClipRef(
-                        episode_id=episode_manifest.episode_id,
-                        video_path=_resolve_video_path(self.root, episode_manifest),
-                        start_frame=clip.start_frame,
-                        end_frame=clip.end_frame,
-                        frame_timestamps_ms=episode.frame_timestamps_ms[
-                            clip.start_frame : clip.end_frame
-                        ],
-                        source=episode_manifest.source.value,
-                        camera_motion=sum(
-                            math.hypot(*action.camera)
-                            for block in clip.action_blocks
-                            for action in block.actions
-                            if action.valid
-                        ),
-                        gui_open=int(
-                            any(
-                                action.gui_open
-                                for block in clip.action_blocks
-                                for action in block.actions
-                                if action.valid
-                            )
-                        ),
-                    )
+            timestamps = store.read_frame_timestamps(episode_manifest.episode_id)
+            clip_start_ranges = eligible_clip_start_ranges(
+                timestamps,
+                clip_frames=self.clip_frames,
+                sampling_rate=self.sampling_rate,
+                max_frame_gap_ms=self.max_frame_gap_ms,
+            )
+            if not clip_start_ranges:
+                continue
+            references.append(
+                VisualEpisodeRef(
+                    episode_id=episode_manifest.episode_id,
+                    video_path=_resolve_video_path(self.root, episode_manifest),
+                    frame_timestamps_ms=timestamps,
+                    clip_start_ranges=clip_start_ranges,
+                    source=episode_manifest.source.value,
                 )
+            )
         if not references:
-            raise ValueError(f"no {split!r} visual clips found under {self.root}")
+            raise ValueError(f"no {split!r} videos can provide a full visual clip")
         self.references = tuple(references)
 
     def __len__(self) -> int:
         return len(self.references)
 
-    def __getitem__(self, index: int) -> Dict[str, object]:
-        reference = self.references[index]
+    def __getitem__(self, index: SampleIndex) -> Dict[str, object]:
+        if isinstance(index, tuple):
+            episode_index, clip_seed = index
+        else:
+            episode_index = int(index)
+            clip_seed = self.seed + episode_index
+        reference = self.references[episode_index]
+        frame_indices = random_clip_frame_indices_from_ranges(
+            reference.clip_start_ranges,
+            clip_frames=self.clip_frames,
+            sampling_rate=self.sampling_rate,
+            generator=random.Random(clip_seed),
+        )
+        timestamps_ms = tuple(
+            reference.frame_timestamps_ms[value] for value in frame_indices
+        )
         frames = decode_frames_at_timestamps(
             reference.video_path,
-            reference.frame_timestamps_ms,
+            timestamps_ms,
         )
-        # 这些标签只给离线 probe 使用，不会作为 visual encoder 的输入。
         scene_change = (frames[-1].float() - frames[0].float()).abs().mean().div(255.0)
-        return {
+        result: Dict[str, object] = {
             "frames": frames,
-            "sample_id": reference.sample_id,
+            "sample_id": (
+                f"{reference.episode_id}:{frame_indices[0]}-{frame_indices[-1] + 1}"
+                f"@{self.sampling_rate}"
+            ),
             "source": reference.source,
-            "camera_motion": torch.tensor(reference.camera_motion, dtype=torch.float32),
-            "gui_open": torch.tensor(reference.gui_open, dtype=torch.long),
             "scene_change": scene_change,
         }
+        if self.include_probe_labels:
+            episode = EpisodeStore(self.root).read_episode(reference.episode_id)
+            aligned = align_actions_to_frames(
+                episode.frame_timestamps_ms,
+                episode.actions,
+                max_frame_gap_ms=self.max_frame_gap_ms,
+            )
+            action_blocks = aligned.blocks[frame_indices[0] : frame_indices[-1]]
+            result["camera_motion"] = torch.tensor(
+                sum(
+                    math.hypot(*action.camera)
+                    for block in action_blocks
+                    for action in block.actions
+                    if action.valid
+                ),
+                dtype=torch.float32,
+            )
+            result["gui_open"] = torch.tensor(
+                int(
+                    any(
+                        action.gui_open
+                        for block in action_blocks
+                        for action in block.actions
+                        if action.valid
+                    )
+                ),
+                dtype=torch.long,
+            )
+        return result
 
 
+def _seeded_index(index: int, *, seed: int, epoch: int, draw: int) -> Tuple[int, int]:
+    """Attach a deterministic random-clip seed to one sampled video index."""
 
-class ResumableSampler(Sampler[int]):
+    clip_seed = (seed * 1_000_003 + epoch * 1_000_000_007 + draw) % (2**63 - 1)
+    return index, clip_seed
+
+
+class ResumableSampler(Sampler[SampleIndex]):
     """每个 epoch 都可复现，并能从 epoch 内精确位置恢复的 sampler。"""
 
-    def __init__(self, length: int, *, seed: int, weights: torch.Tensor = None) -> None:
+    def __init__(
+        self,
+        length: int,
+        *,
+        seed: int,
+        weights: torch.Tensor = None,
+        seed_clips: bool = False,
+    ) -> None:
         self.full_length = int(length)
         self.seed = int(seed)
         self.weights = weights
+        self.seed_clips = bool(seed_clips)
         self.epoch = 0
         self.start_index = 0
 
@@ -199,7 +249,7 @@ class ResumableSampler(Sampler[int]):
             raise ValueError("sampler start_index is out of range")
         self.start_index = int(start_index)
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self) -> Iterator[SampleIndex]:
         generator = torch.Generator().manual_seed(self.seed + self.epoch)
         if self.weights is None:
             indices = torch.randperm(self.full_length, generator=generator)
@@ -210,7 +260,18 @@ class ResumableSampler(Sampler[int]):
                 replacement=True,
                 generator=generator,
             )
-        return iter(indices[self.start_index :].tolist())
+        selected = indices[self.start_index :].tolist()
+        if self.seed_clips:
+            selected = [
+                _seeded_index(
+                    int(index),
+                    seed=self.seed,
+                    epoch=self.epoch,
+                    draw=self.start_index + offset,
+                )
+                for offset, index in enumerate(selected)
+            ]
+        return iter(selected)
 
 
 def source_balanced_weights(dataset: CanonicalVisualDataset) -> torch.Tensor:
@@ -221,7 +282,7 @@ def source_balanced_weights(dataset: CanonicalVisualDataset) -> torch.Tensor:
     )
 
 
-class DistributedSourceBalancedSampler(Sampler[int]):
+class DistributedSourceBalancedSampler(Sampler[SampleIndex]):
     """先让两种数据源期望采样量相等，再把样本分给不同 rank。"""
 
     def __init__(
@@ -254,7 +315,7 @@ class DistributedSourceBalancedSampler(Sampler[int]):
             raise ValueError("sampler start_index is out of range")
         self.start_index = int(start_index)
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self) -> Iterator[SampleIndex]:
         generator = torch.Generator().manual_seed(self.seed + self.epoch)
         indices = torch.multinomial(
             self.weights,
@@ -263,19 +324,39 @@ class DistributedSourceBalancedSampler(Sampler[int]):
             generator=generator,
         )
         per_rank = indices[self.rank :: self.world_size]
-        return iter(per_rank[self.start_index :].tolist())
+        selected = per_rank[self.start_index :].tolist()
+        return iter(
+            [
+                _seeded_index(
+                    int(index),
+                    seed=self.seed,
+                    epoch=self.epoch,
+                    draw=(self.start_index + offset) * self.world_size + self.rank,
+                )
+                for offset, index in enumerate(selected)
+            ]
+        )
 
 
-class DistributedResumableSampler(Sampler[int]):
+class DistributedResumableSampler(Sampler[SampleIndex]):
     """支持确定性 epoch 和精确 offset resume 的多卡随机 sampler。"""
 
-    def __init__(self, length: int, *, rank: int, world_size: int, seed: int) -> None:
+    def __init__(
+        self,
+        length: int,
+        *,
+        rank: int,
+        world_size: int,
+        seed: int,
+        seed_clips: bool = False,
+    ) -> None:
         if not 0 <= rank < world_size:
             raise ValueError("rank must be within world_size")
         self.dataset_length = int(length)
         self.rank = rank
         self.world_size = world_size
         self.seed = int(seed)
+        self.seed_clips = bool(seed_clips)
         self.full_length = math.ceil(self.dataset_length / world_size)
         self.epoch = 0
         self.start_index = 0
@@ -291,7 +372,7 @@ class DistributedResumableSampler(Sampler[int]):
             raise ValueError("sampler start_index is out of range")
         self.start_index = int(start_index)
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self) -> Iterator[SampleIndex]:
         generator = torch.Generator().manual_seed(self.seed + self.epoch)
         indices = torch.randperm(self.dataset_length, generator=generator).tolist()
         total = self.full_length * self.world_size
@@ -299,4 +380,15 @@ class DistributedResumableSampler(Sampler[int]):
         if len(indices) < total:
             indices.extend(indices[: total - len(indices)])
         per_rank = indices[self.rank:total:self.world_size]
-        return iter(per_rank[self.start_index :])
+        selected = per_rank[self.start_index :]
+        if self.seed_clips:
+            selected = [
+                _seeded_index(
+                    int(index),
+                    seed=self.seed,
+                    epoch=self.epoch,
+                    draw=(self.start_index + offset) * self.world_size + self.rank,
+                )
+                for offset, index in enumerate(selected)
+            ]
+        return iter(selected)

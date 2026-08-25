@@ -96,7 +96,9 @@ def main() -> None:
             args.data_root,
             split=split,
             clip_frames=clip_frames,
-            stride=int(config["data"].get("clip_stride", 1)),
+            sampling_rate=int(config["data"]["sampling_rate"]),
+            seed=int(config.get("seed", 2026)),
+            include_probe_labels=True,
         )
         for split in ("train", "validation")
     }

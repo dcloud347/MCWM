@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Sequence, Tuple
 
-from mcwm.models.masking import MaskConfig
+from mcwm.models.masking import MaskConfig, MaskGeneratorConfig
 from mcwm.models.visual_encoder import VisualEncoderConfig
 from mcwm.models.visual_jepa import VisualJEPA, VisualJEPAConfig
 from mcwm.models.visual_predictor import VisualPredictorConfig
@@ -24,6 +25,52 @@ def load_yaml_config(path: Path) -> Dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("training config root must be a mapping")
     return config
+
+
+def _float_pair(values: Any, name: str) -> Tuple[float, float]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise ValueError(f"{name} must contain two numbers")
+    if len(values) != 2:
+        raise ValueError(f"{name} must contain two numbers")
+    return float(values[0]), float(values[1])
+
+
+def _parse_mask_config(value: Any) -> MaskConfig:
+    """读取与 V-JEPA 2 官方 YAML 同形状的 mask generator 列表。"""
+
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or not value
+    ):
+        raise ValueError("mask must be a non-empty list")
+    generators = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"mask[{index}] must be a mapping")
+        missing = {
+            "spatial_scale",
+            "temporal_scale",
+            "aspect_ratio",
+            "num_blocks",
+        } - entry.keys()
+        if missing:
+            raise ValueError(f"mask[{index}] is missing fields: {sorted(missing)}")
+        generators.append(
+            MaskGeneratorConfig(
+                spatial_scale=_float_pair(
+                    entry["spatial_scale"], f"mask[{index}].spatial_scale"
+                ),
+                temporal_scale=_float_pair(
+                    entry["temporal_scale"], f"mask[{index}].temporal_scale"
+                ),
+                aspect_ratio=_float_pair(
+                    entry["aspect_ratio"], f"mask[{index}].aspect_ratio"
+                ),
+                num_blocks=int(entry["num_blocks"]),
+            )
+        )
+    return MaskConfig(generators=tuple(generators))
 
 
 def validate_pretrain_config(config: Mapping[str, Any]) -> None:
@@ -48,11 +95,29 @@ def validate_pretrain_config(config: Mapping[str, Any]) -> None:
         raise ValueError("device must be cpu or cuda")
     if config.get("precision") not in {"fp32", "bf16", "fp16"}:
         raise ValueError("precision must be fp32, bf16 or fp16")
+    data = config["data"]
+    missing_data = {"clip_frames", "sampling_rate", "clips_per_video"} - data.keys()
+    if missing_data:
+        raise ValueError(f"config data is missing fields: {sorted(missing_data)}")
+    if int(data["clip_frames"]) < 2:
+        raise ValueError("data.clip_frames must be at least two")
+    if int(data["sampling_rate"]) <= 0:
+        raise ValueError("data.sampling_rate must be positive")
+    if int(data["clips_per_video"]) != 1:
+        raise ValueError("data.clips_per_video must be one")
+    _parse_mask_config(config["mask"])
+    optimizer = config["optimizer"]
+    epochs = optimizer.get("epochs")
+    if epochs is None or not math.isfinite(float(epochs)) or float(epochs) <= 0:
+        raise ValueError("optimizer.epochs must be positive and finite")
+    iterations_per_epoch = optimizer.get("iterations_per_epoch")
+    if iterations_per_epoch is None or int(iterations_per_epoch) <= 0:
+        raise ValueError("optimizer.iterations_per_epoch must be positive")
     strategy = config["distributed"].get("strategy", "none")
     if strategy not in {"none", "ddp", "fsdp"}:
         raise ValueError("distributed.strategy must be none, ddp or fsdp")
-    per_step = int(config["data"]["batch_size"])
-    effective = int(config["optimizer"]["effective_batch_size"])
+    per_step = int(data["batch_size"])
+    effective = int(optimizer["effective_batch_size"])
     if min(per_step, effective) <= 0:
         raise ValueError("batch sizes must be positive")
     positive_intervals = (
@@ -91,11 +156,7 @@ def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:
         patch_count=encoder.patch_count,
         gradient_checkpointing=bool(model.get("gradient_checkpointing", True)),
     )
-    mask = MaskConfig(
-        ratio=float(config["mask"]["ratio"]),
-        spatial_blocks=int(config["mask"].get("spatial_blocks", 4)),
-        temporal_tubes=int(config["mask"].get("temporal_tubes", 4)),
-    )
+    mask = _parse_mask_config(config["mask"])
     return VisualJEPA(VisualJEPAConfig(encoder=encoder, predictor=predictor, mask=mask))
 
 

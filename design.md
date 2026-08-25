@@ -167,7 +167,7 @@ valid_mask:   bool[T, K]
 metadata:     episode_id, session_id, source, recorder_version
 ```
 
-`K` 是两个保留帧之间的原始动作 tick 数。默认 `K=4`，但原始逐 tick 动作始终保留，因此可以通过配置改变 temporal stride 而不用重新下载数据。
+`K` 是两个保留帧之间的原始动作 tick 数。视觉预训练遵循 V-JEPA 的 `sampling_rate=4`，即每隔 4 个源帧保留一帧，因此约为 `K=4`；原始逐 tick 动作始终保留，因此可以通过配置改变采样率而不用重新下载数据。
 
 ### 4.3 动作编码
 
@@ -278,11 +278,9 @@ EMA momentum 采用 cosine schedule，初始 `0.996`，最终逐步接近 `1.0`�
 
 `360` 不能被 patch size 16 整除，因此首版使用 `20x20` non-overlapping patches；`640/20=32`、`360/20=18`，无需 padding 或裁剪。
 
-视觉预训练 clip 默认包含 16 帧，先做空间 patch embedding，再使用时空 positional embedding。每个 clip 共 9216 个 patch token，因此不能直接使用一次全局时空 self-attention。mask 同时覆盖：
+视觉预训练遵循 V-JEPA 的随机 clip 语义：每次访问一个视频时随机选择起点，再以 `sampling_rate=4` 保留 16 帧，不预先枚举固定 hop 窗口。先做空间 patch embedding，再使用时空 positional embedding。每个 clip 共 9216 个 patch token，因此不能直接使用一次全局时空 self-attention。
 
-- 大面积 spatial blocks，迫使模型理解物体和 UI 结构。
-- 连续 temporal tubes，迫使模型理解运动和状态变化。
-- 少量跨帧随机 blocks，减少局部复制捷径。
+mask 使用 V-JEPA 2 的两组 multi-block 配置。第一组把 8 个约占空间 patch 网格 15% 的矩形取并集，第二组把 2 个约占 70% 的矩形取并集；两组的 aspect ratio 都在 `[0.75, 1.5]` 内，temporal scale 固定为 `1.0`，所以每个矩形贯穿完整 16 帧。同一 clip 分别用两套 mask 构造 context，两个 masked-token prediction loss 等权平均；不把 10 个矩形合成一个 mask，也不补删随机 patch 来凑固定比例。
 
 共享的 2D online encoder 逐帧编码可见 spatial context；共享的 2D EMA target encoder 逐帧编码完整 frame。阶段 A 使用一个约 20M 参数的 factorized 时空 Transformer predictor（8 层、model dim 384、6 heads）：先在每帧内部做 spatial attention，再对相同空间位置跨帧做 temporal attention。禁止对 9216 个 token 直接做全局二次复杂度 attention。
 
@@ -492,7 +490,7 @@ L_pred = Σ_h∈{1,2,4,8} w_h ‖ẑ(t+h) − z_target(t+h)‖₂²
 - total loss 与各项 loss，例如 visual prediction loss、world-model prediction loss 和 SIGReg。
 - learning rate、EMA momentum、gradient norm、parameter norm 和 AMP loss scale。
 - samples/second、tokens/second、data loading time、step time、显存使用量和累计训练时长。
-- mask ratio、spatial/temporal mask 统计，以及各数据来源在当前 batch 中的占比。
+- 每组 mask ratio、跨帧一致性统计，以及各数据来源在当前 batch 中的占比。
 - latent mean/std、effective rank、pairwise cosine、covariance off-diagonal norm 和 online/EMA cosine gap。
 
 每次 validation 记录 validation loss、collapse diagnostics、linear probe、action sensitivity 和多步 rollout 指标中当前阶段适用的部分。可视化采用固定 validation sample ID，以便跨 run 比较：

@@ -20,6 +20,10 @@ class EpisodeStoreTest(unittest.TestCase):
             self.assertEqual(len(vpt.actions), 6)
             self.assertTrue(any(action.is_noop for action in vpt.actions))
             self.assertEqual(len(minerl.actions), 4)
+            self.assertEqual(
+                store.read_frame_timestamps("fixture-vpt"),
+                vpt.frame_timestamps_ms,
+            )
 
             dataset = DatasetManifest.read(Path(temporary) / "dataset_manifest.json")
             self.assertEqual(len(dataset.episodes), 2)

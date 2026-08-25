@@ -29,6 +29,11 @@ def visual_pretraining_images(
         image_tensor = image_tensor.float().clamp(0, 1).mul(255).byte()
     image = image_tensor.permute(1, 2, 0).numpy()
     rows, columns = grid_size
+    # Multi-block 训练返回 [G, B, T, N]；诊断图展示第一套 mask。
+    if target_mask.ndim == 4:
+        target_mask = target_mask[0]
+    if prediction.ndim == 5:
+        prediction = prediction[0]
     if target_mask.shape[-1] != rows * columns:
         raise ValueError("mask patch count does not match grid_size")
     height, width = image.shape[:2]

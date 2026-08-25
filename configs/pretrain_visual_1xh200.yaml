@@ -8,12 +8,15 @@ data:
   root: data/canonical
   train_split: train
   validation_split: validation
+  # V-JEPA 原版语义：每次访问视频时随机选起点，每隔 4 个源帧取一帧。
   clip_frames: 16
-  clip_stride: 8
+  sampling_rate: 4
+  clips_per_video: 1
   # H200 141GB 显存的保守起点；若实测 OOM，降为 4。
   batch_size: 8
   # PyAV 当前在 CPU 上按 PTS 解码；按训练机 CPU 核数酌情调整。
   workers: 12
+  # 按数据源反频率有放回抽取 batch 中的视频。
   source_balanced: true
 model:
   # 640x360 使用 20x20 patch，每帧得到 18x32=576 个 patch token。
@@ -30,10 +33,15 @@ model:
   predictor_mlp_dim: 768
   gradient_checkpointing: true
 mask:
-  # True 表示 online encoder 看不到、predictor 需要预测的 patch。
-  ratio: 0.75
-  spatial_blocks: 4
-  temporal_tubes: 4
+  # V-JEPA 2 的两套 multi-block mask；每个 block 都贯穿整个 clip。
+  - spatial_scale: [0.15, 0.15]
+    temporal_scale: [1.0, 1.0]
+    aspect_ratio: [0.75, 1.5]
+    num_blocks: 8
+  - spatial_scale: [0.70, 0.70]
+    temporal_scale: [1.0, 1.0]
+    aspect_ratio: [0.75, 1.5]
+    num_blocks: 2
 augmentation:
   # 只增强 online 分支；同一个 clip 的所有帧共用颜色变换。
   enabled: true
@@ -46,13 +54,14 @@ optimizer:
   gradient_clip: 1.0
   # 8 clips/micro-step x 8 accumulation steps = 64 clips/optimizer step。
   effective_batch_size: 64
-  # 7,812 steps x 64 = 499,968 training clips。
-  max_steps: 7812
-  warmup_steps: 400
+  # 总 optimizer steps = iterations_per_epoch × epochs。
+  iterations_per_epoch: 300
+  epochs: 20
+  warmup_steps: 100
   ema_start: 0.996
   ema_end: 1.0
 validation:
-  every_steps: 1000
+  every_steps: 100
   batches: 32
   collapse_check: true
 collapse:
@@ -61,7 +70,7 @@ collapse:
   maximum_pairwise_cosine: 0.999
   patience_validations: 3
 checkpoint:
-  every_steps: 1000
+  every_steps: 100
   keep_last: 3
   resume: null
 distributed:

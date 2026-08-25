@@ -387,6 +387,14 @@ def _learning_rate_lambda(step: int, *, warmup: int, total: int) -> float:
     return 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
+def _total_optimizer_steps(optimizer_config: Mapping[str, Any]) -> int:
+    """Convert the configured epochs into an optimizer-step budget."""
+
+    epochs = float(optimizer_config["epochs"])
+    iterations_per_epoch = int(optimizer_config["iterations_per_epoch"])
+    return math.ceil(epochs * iterations_per_epoch)
+
+
 def _infinite_batches(
     loader: DataLoader,
     *,
@@ -474,7 +482,8 @@ def validate(
             output = model(frames, mask_generator=mask_generator)
         losses.append(output["loss"].detach().float())
         targets.append(output["target"].mean(dim=2).detach())
-        gaps.append(online_target_gap(output["online"].mean(dim=2), output["target"].mean(dim=2)))
+        mean_online = output["online"].mean(dim=0).mean(dim=2)
+        gaps.append(online_target_gap(mean_online, output["target"].mean(dim=2)))
         if batch_index == 0:
             visuals = visual_pretraining_images(
                 frames,
@@ -547,13 +556,15 @@ def _make_loaders(
             root,
             split=data.get("train_split", "train"),
             clip_frames=int(data["clip_frames"]),
-            stride=int(data.get("clip_stride", 1)),
+            sampling_rate=int(data["sampling_rate"]),
+            seed=seed,
         )
         validation_dataset = CanonicalVisualDataset(
             root,
             split=data.get("validation_split", "validation"),
             clip_frames=int(data["clip_frames"]),
-            stride=int(data.get("clip_stride", 1)),
+            sampling_rate=int(data["sampling_rate"]),
+            seed=seed + 10000,
         )
 
     train_sampler = None
@@ -568,7 +579,11 @@ def _make_loaders(
             )
         else:
             train_sampler = DistributedResumableSampler(
-                len(train_dataset), rank=rank, world_size=world_size, seed=seed
+                len(train_dataset),
+                rank=rank,
+                world_size=world_size,
+                seed=seed,
+                seed_clips=isinstance(train_dataset, CanonicalVisualDataset),
             )
         validation_sampler = torch.utils.data.distributed.DistributedSampler(
             validation_dataset, num_replicas=world_size, rank=rank, shuffle=False
@@ -576,11 +591,18 @@ def _make_loaders(
         shuffle = False
     elif data.get("source_balanced", False) and isinstance(train_dataset, CanonicalVisualDataset):
         train_sampler = ResumableSampler(
-            len(train_dataset), seed=seed, weights=source_balanced_weights(train_dataset)
+            len(train_dataset),
+            seed=seed,
+            weights=source_balanced_weights(train_dataset),
+            seed_clips=True,
         )
         shuffle = False
     else:
-        train_sampler = ResumableSampler(len(train_dataset), seed=seed)
+        train_sampler = ResumableSampler(
+            len(train_dataset),
+            seed=seed,
+            seed_clips=isinstance(train_dataset, CanonicalVisualDataset),
+        )
         shuffle = False
 
     common = {
@@ -638,13 +660,18 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
         lr=float(optimizer_config["learning_rate"]),
         weight_decay=float(optimizer_config["weight_decay"]),
     )
-    max_steps = int(optimizer_config["max_steps"])
+    per_micro_batch = int(config["data"]["batch_size"]) * world_size
+    effective_batch = int(optimizer_config["effective_batch_size"])
+    if effective_batch % per_micro_batch:
+        raise ValueError("effective_batch_size must be divisible by batch_size * world_size")
+    accumulation_steps = effective_batch // per_micro_batch
+    total_steps = _total_optimizer_steps(optimizer_config)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lambda step: _learning_rate_lambda(
             step,
             warmup=int(optimizer_config["warmup_steps"]),
-            total=max_steps,
+            total=total_steps,
         ),
     )
     use_scaler = config["precision"] == "fp16" and device.type == "cuda"
@@ -652,11 +679,6 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
         scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
     except (AttributeError, TypeError):  # 兼容较早的受支持 PyTorch。
         scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
-    per_micro_batch = int(config["data"]["batch_size"]) * world_size
-    effective_batch = int(optimizer_config["effective_batch_size"])
-    if effective_batch % per_micro_batch:
-        raise ValueError("effective_batch_size must be divisible by batch_size * world_size")
-    accumulation_steps = effective_batch // per_micro_batch
 
     output_dir = Path(config["output_dir"])
     if rank == 0:
@@ -722,6 +744,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                 "system/world_size": world_size,
                 "system/effective_batch_size": effective_batch,
                 "system/accumulation_steps": accumulation_steps,
+                "system/total_steps": total_steps,
             },
             step=optimizer_step,
         )
@@ -752,7 +775,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     model.train()
     last_checkpoint = output_dir / f"checkpoint-{optimizer_step:08d}.pt"
     try:
-        while optimizer_step < max_steps:
+        while optimizer_step < total_steps:
             step_started = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
             accumulated_loss = 0.0
@@ -830,7 +853,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
             scheduler.step()
             momentum = cosine_ema_momentum(
                 optimizer_step,
-                max_steps,
+                total_steps,
                 float(optimizer_config["ema_start"]),
                 float(optimizer_config.get("ema_end", 1.0)),
             )
@@ -843,6 +866,8 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                 elapsed = time.perf_counter() - step_started
                 metrics: Dict[str, float] = {
                     "train/loss": accumulated_loss / accumulation_steps,
+                    "train/epoch": optimizer_step
+                    / int(optimizer_config["iterations_per_epoch"]),
                     "train/learning_rate": scheduler.get_last_lr()[0],
                     "train/ema_momentum": momentum,
                     "train/gradient_norm": float(gradient_norm),
@@ -867,12 +892,18 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                         fsdp_sharded=world_size > 1 and strategy == "fsdp",
                     ),
                 }
-                if output["target_mask"].shape[1] > 1:
+                for group_index, group_mask in enumerate(output["target_mask"]):
+                    metrics[f"mask/group_{group_index}_ratio"] = (
+                        group_mask.float().mean().item()
+                    )
+                if output["target_mask"].shape[2] > 1:
                     adjacent_intersection = (
-                        output["target_mask"][:, 1:] & output["target_mask"][:, :-1]
+                        output["target_mask"][:, :, 1:]
+                        & output["target_mask"][:, :, :-1]
                     ).float().sum()
                     adjacent_union = (
-                        output["target_mask"][:, 1:] | output["target_mask"][:, :-1]
+                        output["target_mask"][:, :, 1:]
+                        | output["target_mask"][:, :, :-1]
                     ).float().sum().clamp_min(1.0)
                     metrics["mask/adjacent_iou"] = (
                         adjacent_intersection / adjacent_union
@@ -899,7 +930,8 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                     )
                     metrics["train/online_target_cosine_gap"] = _distributed_mean(
                         online_target_gap(
-                            output["online"].mean(dim=2), output["target"].mean(dim=2)
+                            output["online"].mean(dim=0).mean(dim=2),
+                            output["target"].mean(dim=2),
                         ),
                         device,
                     )
@@ -1012,7 +1044,6 @@ def main() -> None:
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--max-steps", type=int)
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"))
     parser.add_argument(
         "--synthetic",
@@ -1027,8 +1058,6 @@ def main() -> None:
         config["output_dir"] = str(args.output_dir)
     if args.resume is not None:
         config["checkpoint"]["resume"] = str(args.resume)
-    if args.max_steps is not None:
-        config["optimizer"]["max_steps"] = args.max_steps
     if args.wandb_mode is not None:
         config["wandb"]["mode"] = args.wandb_mode
         config["wandb"]["enabled"] = args.wandb_mode != "disabled"

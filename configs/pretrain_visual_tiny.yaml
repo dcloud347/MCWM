@@ -8,7 +8,8 @@ data:
   train_split: train
   validation_split: validation
   clip_frames: 4
-  clip_stride: 1
+  sampling_rate: 4
+  clips_per_video: 1
   batch_size: 2
   workers: 0
   source_balanced: false
@@ -26,9 +27,14 @@ model:
   predictor_mlp_dim: 64
   gradient_checkpointing: false
 mask:
-  ratio: 0.5
-  spatial_blocks: 1
-  temporal_tubes: 1
+  - spatial_scale: [0.15, 0.15]
+    temporal_scale: [1.0, 1.0]
+    aspect_ratio: [0.75, 1.5]
+    num_blocks: 8
+  - spatial_scale: [0.70, 0.70]
+    temporal_scale: [1.0, 1.0]
+    aspect_ratio: [0.75, 1.5]
+    num_blocks: 2
 augmentation:
   enabled: false
   brightness: 0.0
@@ -39,7 +45,8 @@ optimizer:
   weight_decay: 0.0
   gradient_clip: 1.0
   effective_batch_size: 2
-  max_steps: 20
+  iterations_per_epoch: 2
+  epochs: 1
   warmup_steps: 2
   ema_start: 0.9
   ema_end: 0.99

@@ -1,8 +1,9 @@
+import random
 import unittest
 
 from mcwm.actions.schema import ActionSource, CanonicalActionTick
 from mcwm.data.alignment import align_actions_to_frames
-from mcwm.data.dataset import iter_clip_indices
+from mcwm.data.dataset import random_clip_frame_indices
 from mcwm.data.episode_store import StoredEpisode
 from mcwm.data.manifest import EpisodeManifest
 
@@ -42,10 +43,63 @@ class AlignmentTest(unittest.TestCase):
             end_timestamp_ms=600,
         )
         episode = StoredEpisode(manifest, frames, actions)
-        clips = list(iter_clip_indices(episode, transitions=2, max_frame_gap_ms=250))
-        self.assertEqual([(clip.start_frame, clip.end_frame) for clip in clips], [(0, 3)])
+        frame_indices = random_clip_frame_indices(
+            episode.frame_timestamps_ms,
+            clip_frames=3,
+            sampling_rate=1,
+            generator=random.Random(0),
+            max_frame_gap_ms=250,
+        )
+        self.assertEqual(frame_indices, (0, 1, 2))
+
+    def test_vjepa_sampling_rate_uses_random_start_and_four_source_frame_step(self):
+        frames = tuple(range(0, 8001, 50))
+        actions = tuple(noop(value) for value in range(0, 8000, 50))
+        manifest = EpisodeManifest(
+            episode_id="e",
+            session_id="s",
+            world_id="w",
+            source=ActionSource.VPT,
+            recorder_version="7.6",
+            video_path="fixture://e.mp4",
+            width=640,
+            height=360,
+            frame_count=len(frames),
+            action_count=len(actions),
+            start_timestamp_ms=frames[0],
+            end_timestamp_ms=frames[-1],
+        )
+        episode = StoredEpisode(manifest, frames, actions)
+
+        first = random_clip_frame_indices(
+            episode.frame_timestamps_ms,
+            clip_frames=16,
+            sampling_rate=4,
+            generator=random.Random(7),
+        )
+        repeated = random_clip_frame_indices(
+            episode.frame_timestamps_ms,
+            clip_frames=16,
+            sampling_rate=4,
+            generator=random.Random(7),
+        )
+
+        self.assertEqual(first, repeated)
+        self.assertEqual(len(first), 16)
+        self.assertTrue(
+            all(
+                current - previous == 4
+                for previous, current in zip(first, first[1:])
+            )
+        )
+        self.assertEqual(
+            [
+                frames[current] - frames[previous]
+                for previous, current in zip(first, first[1:])
+            ],
+            [200] * 15,
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
-

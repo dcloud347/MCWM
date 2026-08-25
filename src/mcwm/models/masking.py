@@ -1,8 +1,9 @@
-"""M1 video JEPA 使用的结构化空间—时间 mask。"""
+"""V-JEPA 2 风格的 multi-block 时空 mask。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import torch
@@ -10,30 +11,75 @@ from torch import Tensor
 
 
 @dataclass(frozen=True)
-class MaskConfig:
-    """mask 比例及两类结构化 mask 的数量。"""
+class MaskGeneratorConfig:
+    """一组取并集的 3D block mask 参数。"""
 
-    ratio: float = 0.75
-    spatial_blocks: int = 4
-    temporal_tubes: int = 4
-    min_block_fraction: float = 0.08
-    max_block_fraction: float = 0.30
+    spatial_scale: Tuple[float, float]
+    temporal_scale: Tuple[float, float]
+    aspect_ratio: Tuple[float, float]
+    num_blocks: int
 
     def __post_init__(self) -> None:
-        if not 0.0 < self.ratio < 1.0:
-            raise ValueError("mask ratio must be between 0 and 1")
-        if min(self.spatial_blocks, self.temporal_tubes) < 0:
-            raise ValueError("block counts cannot be negative")
-        if not 0.0 < self.min_block_fraction <= self.max_block_fraction <= 1.0:
-            raise ValueError("invalid block fraction range")
+        self._validate_range("spatial_scale", self.spatial_scale, upper=1.0)
+        self._validate_range("temporal_scale", self.temporal_scale, upper=1.0)
+        self._validate_range("aspect_ratio", self.aspect_ratio)
+        if self.num_blocks <= 0:
+            raise ValueError("num_blocks must be positive")
+
+    @staticmethod
+    def _validate_range(
+        name: str,
+        values: Tuple[float, float],
+        *,
+        upper: Optional[float] = None,
+    ) -> None:
+        if len(values) != 2:
+            raise ValueError(f"{name} must contain two values")
+        low, high = values
+        if low <= 0.0 or high < low or (upper is not None and high > upper):
+            raise ValueError(f"invalid {name} range")
+
+
+def _default_generators() -> Tuple[MaskGeneratorConfig, ...]:
+    """V-JEPA 2 16-frame pretraining config 中的两组默认 mask。"""
+
+    common = {
+        "temporal_scale": (1.0, 1.0),
+        "aspect_ratio": (0.75, 1.5),
+    }
+    return (
+        MaskGeneratorConfig(
+            spatial_scale=(0.15, 0.15),
+            num_blocks=8,
+            **common,
+        ),
+        MaskGeneratorConfig(
+            spatial_scale=(0.70, 0.70),
+            num_blocks=2,
+            **common,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class MaskConfig:
+    """按顺序保存独立计算 loss 的 multi-block mask 组。"""
+
+    generators: Tuple[MaskGeneratorConfig, ...] = field(
+        default_factory=_default_generators
+    )
+
+    def __post_init__(self) -> None:
+        if not self.generators:
+            raise ValueError("at least one mask generator is required")
 
 
 class SpatiotemporalMaskSampler:
-    """混合大块 spatial mask、连续 temporal tube 和随机 patch。
+    """生成 V-JEPA 2 multi-block mask。
 
-    返回值形状是 ``[B, T, H*W]``，其中 ``True`` 始终表示“隐藏且需要预测”。
-    mask 相比视频很小，所以统一在 CPU 生成；这样同一个 seed 在 CPU 和 CUDA
-    训练机上都能得到相同 mask。
+    返回值形状为 ``[G, B, T, H*W]``。``G`` 是配置中的 mask 组数；
+    每组先为整个 batch 抽一个 block 尺寸，再为每个样本独立抽位置，并把该组
+    的所有 block 取并集。``True`` 表示 online encoder 不可见且需要预测。
     """
 
     def __init__(self, grid_size: Tuple[int, int], config: MaskConfig) -> None:
@@ -48,18 +94,64 @@ class SpatiotemporalMaskSampler:
             return low
         return int(torch.randint(low, high, (), generator=generator).item())
 
-    def _rectangle(self, generator: Optional[torch.Generator]) -> Tuple[int, int, int, int]:
-        total = self.rows * self.columns
-        min_area = max(1, round(total * self.config.min_block_fraction))
-        max_area = max(min_area, round(total * self.config.max_block_fraction))
-        area = self._randint(min_area, max_area + 1, generator)
-        aspect_choices = (0.5, 0.75, 1.0, 1.5, 2.0)
-        aspect = aspect_choices[self._randint(0, len(aspect_choices), generator)]
-        height = max(1, min(self.rows, round((area / aspect) ** 0.5)))
-        width = max(1, min(self.columns, round(area / height)))
-        top = self._randint(0, self.rows - height + 1, generator)
-        left = self._randint(0, self.columns - width + 1, generator)
-        return top, left, height, width
+    @staticmethod
+    def _uniform(
+        values: Tuple[float, float], generator: Optional[torch.Generator]
+    ) -> float:
+        low, high = values
+        if high == low:
+            return low
+        draw = float(torch.rand((), generator=generator).item())
+        return low + draw * (high - low)
+
+    def _sample_block_size(
+        self,
+        clip_frames: int,
+        config: MaskGeneratorConfig,
+        generator: Optional[torch.Generator],
+    ) -> Tuple[int, int, int]:
+        temporal_scale = self._uniform(config.temporal_scale, generator)
+        spatial_scale = self._uniform(config.spatial_scale, generator)
+        aspect_ratio = self._uniform(config.aspect_ratio, generator)
+
+        duration = max(1, int(clip_frames * temporal_scale))
+        spatial_area = max(1, int(self.rows * self.columns * spatial_scale))
+        height = max(1, int(round(math.sqrt(spatial_area * aspect_ratio))))
+        width = max(1, int(round(math.sqrt(spatial_area / aspect_ratio))))
+        return (
+            min(duration, clip_frames),
+            min(height, self.rows),
+            min(width, self.columns),
+        )
+
+    def _sample_group_mask(
+        self,
+        clip_frames: int,
+        block_size: Tuple[int, int, int],
+        num_blocks: int,
+        generator: Optional[torch.Generator],
+    ) -> Tensor:
+        duration, height, width = block_size
+        # 和官方实现一样，若 block 的并集吃掉了全部 context，就重新抽位置。
+        for _ in range(100):
+            mask = torch.zeros(
+                clip_frames,
+                self.rows,
+                self.columns,
+                dtype=torch.bool,
+            )
+            for _ in range(num_blocks):
+                start = self._randint(0, clip_frames - duration + 1, generator)
+                top = self._randint(0, self.rows - height + 1, generator)
+                left = self._randint(0, self.columns - width + 1, generator)
+                mask[
+                    start : start + duration,
+                    top : top + height,
+                    left : left + width,
+                ] = True
+            if mask.any() and not mask.all():
+                return mask
+        raise RuntimeError("could not sample a mask with non-empty context")
 
     def sample(
         self,
@@ -71,45 +163,24 @@ class SpatiotemporalMaskSampler:
     ) -> Tensor:
         if min(batch_size, clip_frames) <= 0:
             raise ValueError("batch_size and clip_frames must be positive")
-        mask = torch.zeros(
-            batch_size,
-            clip_frames,
-            self.rows,
-            self.columns,
-            dtype=torch.bool,
-        )
-        target_count = max(
-            1,
-            min(clip_frames * self.rows * self.columns - 1, round(mask[0].numel() * self.config.ratio)),
-        )
-        for batch_index in range(batch_size):
-            # spatial block 贯穿整个 clip，避免模型只复制相邻帧纹理来解题。
-            for _ in range(self.config.spatial_blocks):
-                top, left, height, width = self._rectangle(generator)
-                mask[batch_index, :, top : top + height, left : left + width] = True
 
-            # temporal tube 只遮住一段连续时间内的局部空间区域。
-            for _ in range(self.config.temporal_tubes):
-                top, left, height, width = self._rectangle(generator)
-                start = self._randint(0, clip_frames, generator)
-                length = self._randint(1, clip_frames - start + 1, generator)
-                mask[
-                    batch_index,
-                    start : start + length,
-                    top : top + height,
-                    left : left + width,
-                ] = True
+        groups = []
+        for group_config in self.config.generators:
+            block_size = self._sample_block_size(
+                clip_frames,
+                group_config,
+                generator,
+            )
+            batch_masks = [
+                self._sample_group_mask(
+                    clip_frames,
+                    block_size,
+                    group_config.num_blocks,
+                    generator,
+                )
+                for _ in range(batch_size)
+            ]
+            groups.append(torch.stack(batch_masks).flatten(2))
 
-            # 最后补齐或删减少量随机位置，保证每个样本的 mask ratio 完全一致。
-            flat = mask[batch_index].flatten()
-            masked = torch.nonzero(flat, as_tuple=False).flatten()
-            if masked.numel() > target_count:
-                order = torch.randperm(masked.numel(), generator=generator)
-                flat[masked[order[target_count:]]] = False
-            elif masked.numel() < target_count:
-                visible = torch.nonzero(~flat, as_tuple=False).flatten()
-                order = torch.randperm(visible.numel(), generator=generator)
-                flat[visible[order[: target_count - masked.numel()]]] = True
-
-        result = mask.flatten(2)
+        result = torch.stack(groups)
         return result.to(device=device) if device is not None else result

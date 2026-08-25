@@ -8,10 +8,13 @@ data:
   root: data/canonical
   train_split: train
   validation_split: validation
+  # V-JEPA 原版语义：每次访问视频时随机选起点，每隔 4 个源帧取一帧。
   clip_frames: 16
-  clip_stride: 8
+  sampling_rate: 4
+  clips_per_video: 1
   batch_size: 1
   workers: 8
+  # 按数据源反频率有放回抽取 batch 中的视频。
   source_balanced: true
 model:
   # 640×360 用 20×20 patch，得到 18×32=576 个 patch token。
@@ -28,10 +31,16 @@ model:
   predictor_mlp_dim: 768
   gradient_checkpointing: true
 mask:
-  # True 的 patch 不给 online encoder 看，并作为 predictor 的目标。
-  ratio: 0.75
-  spatial_blocks: 4
-  temporal_tubes: 4
+  # V-JEPA 2：8 个 15% 小块取并集，形成第一套预测 mask。
+  - spatial_scale: [0.15, 0.15]
+    temporal_scale: [1.0, 1.0]
+    aspect_ratio: [0.75, 1.5]
+    num_blocks: 8
+  # 2 个 70% 大块取并集，形成第二套预测 mask；两套 loss 等权平均。
+  - spatial_scale: [0.70, 0.70]
+    temporal_scale: [1.0, 1.0]
+    aspect_ratio: [0.75, 1.5]
+    num_blocks: 2
 augmentation:
   # 只增强 online 分支；同一 clip 的所有帧共用颜色变换。
   enabled: true
@@ -44,14 +53,15 @@ optimizer:
   weight_decay: 0.05
   gradient_clip: 1.0
   effective_batch_size: 64
-  # 7,812 steps x effective batch 64 = 499,968 training clips.
-  max_steps: 7812
-  warmup_steps: 400
+  # 总 optimizer steps = iterations_per_epoch × epochs。
+  iterations_per_epoch: 300
+  epochs: 20
+  warmup_steps: 100
   ema_start: 0.996
   ema_end: 1.0
 validation:
   # 连续多次 collapse 才中止，避免单个异常 validation 误报。
-  every_steps: 1000
+  every_steps: 100
   batches: 32
   collapse_check: true
 collapse:
@@ -61,7 +71,7 @@ collapse:
   patience_validations: 3
 checkpoint:
   # resume 时会校验数据 manifest hash 和关键训练配置。
-  every_steps: 1000
+  every_steps: 300
   keep_last: 3
   resume: null
 distributed:

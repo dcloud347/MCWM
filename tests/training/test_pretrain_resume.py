@@ -8,17 +8,26 @@ try:
     import yaml  # noqa: F401
     from mcwm.training.checkpoint import read_checkpoint
     from mcwm.training.config import load_yaml_config
-    from mcwm.training.pretrain_visual import train
+    from mcwm.training.pretrain_visual import _total_optimizer_steps, train
 except ModuleNotFoundError:
     torch = None
 
 
 @unittest.skipIf(torch is None, "PyTorch/PyYAML is not installed")
 class PretrainResumeTest(unittest.TestCase):
+    def test_fractional_epochs_resolve_to_optimizer_steps(self):
+        self.assertEqual(
+            _total_optimizer_steps(
+                {"epochs": 2.5, "iterations_per_epoch": 300}
+            ),
+            750,
+        )
+
     def test_resume_produces_same_next_step_as_uninterrupted_training(self):
         repository = Path(__file__).resolve().parents[2]
         config = load_yaml_config(repository / "configs" / "pretrain_visual_tiny.yaml")
-        config["optimizer"]["max_steps"] = 2
+        config["optimizer"]["iterations_per_epoch"] = 2
+        config["optimizer"]["epochs"] = 1
         config["checkpoint"]["every_steps"] = 1
         config["checkpoint"]["keep_last"] = 3
         config["validation"]["every_steps"] = 100

@@ -35,7 +35,7 @@ def tiny_model():
         VisualJEPAConfig(
             encoder=encoder,
             predictor=predictor,
-            mask=MaskConfig(ratio=0.5, spatial_blocks=1, temporal_tubes=1),
+            mask=MaskConfig(),
         )
     )
 
@@ -55,8 +55,22 @@ class VisualJEPATest(unittest.TestCase):
         model = tiny_model()
         frames = torch.randint(0, 256, (2, 3, 3, 20, 30), dtype=torch.uint8)
         output = model(frames, mask_generator=torch.Generator().manual_seed(4))
-        self.assertEqual(tuple(output["prediction"].shape), (2, 3, 6, 24))
+        self.assertEqual(tuple(output["prediction"].shape), (2, 2, 3, 6, 24))
+        self.assertEqual(tuple(output["target_mask"].shape), (2, 2, 3, 6))
         self.assertTrue(torch.isfinite(output["loss"]))
+        per_task_losses = []
+        for group_index in range(2):
+            for batch_index in range(2):
+                mask = output["target_mask"][group_index, batch_index]
+                per_task_losses.append(
+                    torch.nn.functional.l1_loss(
+                        output["prediction"][group_index, batch_index][mask],
+                        output["target"][batch_index][mask],
+                    )
+                )
+        self.assertTrue(
+            torch.allclose(output["loss"], torch.stack(per_task_losses).mean())
+        )
         output["loss"].backward()
         self.assertTrue(any(p.grad is not None for p in model.online_encoder.parameters()))
         self.assertTrue(any(p.grad is not None for p in model.predictor.parameters()))

@@ -89,32 +89,78 @@ class VisualJEPA(nn.Module):
                 device=target_frames.device,
             )
         target_mask = target_mask.to(device=target_frames.device, dtype=torch.bool)
-        flat_context_frames = context_frames.flatten(0, 1)
-        flat_target_frames = target_frames.flatten(0, 1)
-        flat_mask = target_mask.flatten(0, 1)
+        if target_mask.ndim == 3:
+            target_mask = target_mask.unsqueeze(0)
+        expected_mask_shape = (
+            batch,
+            clip_frames,
+            self.config.encoder.patch_count,
+        )
+        if target_mask.ndim != 4 or tuple(target_mask.shape[1:]) != expected_mask_shape:
+            raise ValueError("target_mask must have shape [G, B, T, N] or [B, T, N]")
+        flat_group_masks = target_mask.flatten(2)
+        if not flat_group_masks.any(dim=-1).all():
+            raise ValueError("each mask group and sample must contain prediction tokens")
+        if flat_group_masks.all(dim=-1).any():
+            raise ValueError("each mask group and sample must retain visible context")
+        mask_groups = target_mask.shape[0]
 
-        # B 和 T 合并后逐帧调用同一份 2D encoder。
+        # 同一个 clip 分别解两组 masked-context 任务；target encoder 仍只运行一次。
+        grouped_context_frames = context_frames.unsqueeze(0).expand(
+            mask_groups,
+            *context_frames.shape,
+        )
+        flat_context_frames = grouped_context_frames.flatten(0, 2)
+        flat_target_frames = target_frames.flatten(0, 1)
+        flat_mask = target_mask.flatten(0, 2)
+
+        # G、B、T 合并后逐帧调用同一份 2D online encoder。
         online = self.online_encoder(
             flat_context_frames,
             flat_mask,
             return_patch_tokens=True,
-        ).reshape(batch, clip_frames, -1, self.config.encoder.dim)
+        ).reshape(
+            mask_groups,
+            batch,
+            clip_frames,
+            -1,
+            self.config.encoder.dim,
+        )
         # no_grad + 后面的 detach 是显式 stop-gradient 双保险。
         with torch.no_grad():
             target = self.target_encoder(
                 flat_target_frames,
                 return_patch_tokens=True,
             ).reshape(batch, clip_frames, -1, self.config.encoder.dim)
-        predicted = self.predictor(online, target_mask)
-        # 只在 target_mask=True 的位置计算 L1，不惩罚可见 context token。
-        selected_prediction = predicted[target_mask]
-        selected_target = target.detach()[target_mask]
-        loss = torch.nn.functional.l1_loss(selected_prediction, selected_target)
+        predicted = self.predictor(
+            online.flatten(0, 1),
+            target_mask.flatten(0, 1),
+        ).reshape(
+            mask_groups,
+            batch,
+            clip_frames,
+            -1,
+            self.config.encoder.dim,
+        )
+
+        # 官方 loss 对每个样本、每套 mask 分别求 masked-token 均值，再等权平均。
+        detached_target = target.detach()
+        losses = []
+        for group_index in range(mask_groups):
+            for batch_index in range(batch):
+                mask = target_mask[group_index, batch_index]
+                losses.append(
+                    torch.nn.functional.l1_loss(
+                        predicted[group_index, batch_index][mask],
+                        detached_target[batch_index][mask],
+                    )
+                )
+        loss = torch.stack(losses).mean()
         return {
             "loss": loss,
             "online": online,
             "prediction": predicted,
-            "target": target.detach(),
+            "target": detached_target,
             "target_mask": target_mask,
         }
 
