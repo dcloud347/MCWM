@@ -112,17 +112,72 @@ class SpatiotemporalMaskSampler:
     ) -> Tuple[int, int, int]:
         temporal_scale = self._uniform(config.temporal_scale, generator)
         spatial_scale = self._uniform(config.spatial_scale, generator)
-        aspect_ratio = self._uniform(config.aspect_ratio, generator)
 
         duration = max(1, int(clip_frames * temporal_scale))
-        spatial_area = max(1, int(self.rows * self.columns * spatial_scale))
-        height = max(1, int(round(math.sqrt(spatial_area * aspect_ratio))))
-        width = max(1, int(round(math.sqrt(spatial_area / aspect_ratio))))
+        target_area = max(1.0, self.rows * self.columns * spatial_scale)
+        height, width = self._sample_spatial_block_size(
+            target_area,
+            config.aspect_ratio,
+            generator,
+        )
         return (
             min(duration, clip_frames),
-            min(height, self.rows),
-            min(width, self.columns),
+            height,
+            width,
         )
+
+    def _sample_spatial_block_size(
+        self,
+        target_area: float,
+        aspect_ratio: Tuple[float, float],
+        generator: Optional[torch.Generator],
+    ) -> Tuple[int, int]:
+        """按目标面积在矩形网格中采样可行的整数 block 尺寸。
+
+        ``aspect_ratio`` 表示 token 网格中的 ``height / width``。先根据目标
+        面积收紧连续宽高比范围，避免先生成越界矩形再裁剪；随后在满足原始
+        宽高比约束的所有整数尺寸中，选择同时最接近目标面积和抽样宽高比的
+        尺寸。面积与宽高比使用对数误差，使放大和缩小受到对称惩罚。
+        """
+
+        ratio_low, ratio_high = aspect_ratio
+        feasible_low = max(ratio_low, target_area / (self.columns**2))
+        feasible_high = min(ratio_high, (self.rows**2) / target_area)
+        if feasible_low <= feasible_high:
+            sampled_ratio = self._uniform(
+                (feasible_low, feasible_high),
+                generator,
+            )
+        else:
+            # 很小的离散网格可能无法以目标面积精确满足边界；仍在用户配置的
+            # 范围内抽 ratio，再由下面的整数搜索选择最接近的可行尺寸。
+            sampled_ratio = self._uniform(aspect_ratio, generator)
+
+        candidates = []
+        for height in range(1, self.rows + 1):
+            for width in range(1, self.columns + 1):
+                actual_ratio = height / width
+                if ratio_low <= actual_ratio <= ratio_high:
+                    actual_area = height * width
+                    score = (
+                        math.log(actual_area / target_area) ** 2
+                        + math.log(actual_ratio / sampled_ratio) ** 2
+                    )
+                    candidates.append(
+                        (
+                            score,
+                            abs(actual_area - target_area),
+                            height,
+                            width,
+                        )
+                    )
+
+        if not candidates:
+            raise ValueError(
+                "grid has no integer block size satisfying aspect_ratio"
+            )
+        _, _, height, width = min(candidates)
+        return height, width
 
     def _sample_group_mask(
         self,

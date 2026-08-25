@@ -45,6 +45,46 @@ class MaskingTest(unittest.TestCase):
         self.assertEqual(tuple(mask.shape), (1, 1, 3, 16))
         self.assertEqual(mask.sum(dim=-1).tolist(), [[[4, 4, 4]]])
 
+    def test_wide_grid_preserves_large_block_area_and_aspect_ratio(self):
+        config = MaskGeneratorConfig(
+            spatial_scale=(0.70, 0.70),
+            temporal_scale=(1.0, 1.0),
+            aspect_ratio=(0.75, 1.5),
+            num_blocks=1,
+        )
+        sampler = SpatiotemporalMaskSampler((18, 32), MaskConfig((config,)))
+
+        for seed in range(32):
+            _, height, width = sampler._sample_block_size(
+                8,
+                config,
+                torch.Generator().manual_seed(seed),
+            )
+            actual_scale = height * width / (18 * 32)
+            self.assertGreaterEqual(height / width, 0.75)
+            self.assertLessEqual(height / width, 1.5)
+            self.assertLessEqual(abs(actual_scale - 0.70), 0.03)
+
+    def test_wide_grid_large_mask_is_not_shrunk_by_clipping(self):
+        config = MaskConfig(
+            generators=(
+                MaskGeneratorConfig(
+                    spatial_scale=(0.70, 0.70),
+                    temporal_scale=(1.0, 1.0),
+                    aspect_ratio=(0.75, 1.5),
+                    num_blocks=1,
+                ),
+            )
+        )
+        mask = SpatiotemporalMaskSampler((18, 32), config).sample(
+            1,
+            8,
+            generator=torch.Generator().manual_seed(7),
+        )
+        frame_area = int(mask[0, 0, 0].sum().item())
+        self.assertGreaterEqual(frame_area / (18 * 32), 0.67)
+        self.assertLessEqual(frame_area / (18 * 32), 0.73)
+
     def test_invalid_spatial_scale_is_rejected(self):
         with self.assertRaises(ValueError):
             MaskGeneratorConfig(
