@@ -57,8 +57,8 @@ optimizer:
   iterations_per_epoch: 300
   epochs: 20
   warmup_steps: 100
-  ema_start: 0.996
-  ema_end: 1.0
+  ema_start: 0.999
+  ema_end: 0.999
 validation:
   # 连续多次 collapse 才中止，避免单个异常 validation 误报。
   every_steps: 100

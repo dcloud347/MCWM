@@ -58,8 +58,8 @@ optimizer:
   iterations_per_epoch: 300
   epochs: 20
   warmup_steps: 100
-  ema_start: 0.996
-  ema_end: 1.0
+  ema_start: 0.999
+  ema_end: 0.999
 validation:
   every_steps: 100
   batches: 32
