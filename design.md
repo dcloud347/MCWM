@@ -253,7 +253,7 @@ o_0 --A_0--> o_1 --A_1--> ... --A_(T-1)--> o_T
 
 ### 5.1 视觉 encoder
 
-首版使用从零训练的加深型 ViT-Base encoder：
+首版使用从零训练的 ViT-Large 级别 encoder：
 
 | 参数 | 默认值 |
 |---|---:|
@@ -261,14 +261,14 @@ o_0 --A_0--> o_1 --A_1--> ... --A_(T-1)--> o_T
 | patch size | 20 |
 | tubelet size | 2 frames |
 | video tokens | 8 × 32 × 18 = 4608 |
-| depth | 20 |
-| heads | 12 |
-| hidden dim | 768 |
-| MLP hidden dim | 3072 |
-| pooled latent dim | 768 |
-| 参数量 | 约 144M |
+| depth | 24 |
+| heads | 16 |
+| hidden dim | 1024 |
+| MLP hidden dim | 4096 |
+| pooled latent dim | 1024 |
+| 参数量 | 约 305M |
 
-阶段 A 需要 token-level 输出用于 masked prediction。阶段 B 对滚动 16 帧窗口的 video tokens 做 pooling，得到 768 维 state latent；首版使用 mean pooling，不额外引入 CLS token。
+阶段 A 需要 token-level 输出用于 masked prediction。阶段 B 对滚动 16 帧窗口的 video tokens 做 pooling，得到 1024 维 state latent；首版使用 mean pooling，不额外引入 CLS token。
 
 visual encoder 对齐 V-JEPA 2 的 Video ViT 数据流：先用 `Conv3d(kernel=stride=(2,20,20))` 生成 tubelet tokens，再让所有可见时空 token 在 encoder 内联合 self-attention。阶段 B 因此维护滚动 16 帧 observation window，而不是把 encoder 当作单帧 2D 网络。
 
@@ -292,7 +292,7 @@ online encoder 在 Transformer 前移除预测区域，只联合编码可见 con
 
 训练结束时保留 EMA visual encoder；阶段 A predictor 不直接用于阶段 B，防止把“补 masked token”和“动作条件未来预测”混成一个不可解释模块。
 
-M1 默认配置实现后的实际参数量为：单份 visual encoder `143,602,944`，masked-video predictor `21,886,080`，阶段 A 可梯度参数 `165,489,024`，包含 online/EMA 两份 encoder 的 checkpoint 总参数 `309,091,968`。这些数值由 meta-tensor 参数预算测试锁定，不依赖近似估算。
+M1 默认配置实现后的实际参数量为：单份 visual encoder `304,770,048`，masked-video predictor `22,082,944`，阶段 A 可梯度参数 `326,852,992`，包含 online/EMA 两份 encoder 的 checkpoint 总参数 `631,623,040`。这些数值由 meta-tensor 参数预算测试锁定，不依赖近似估算。
 
 ### 5.3 Action encoder
 
@@ -301,7 +301,7 @@ Action encoder 完全从零训练，由以下部分组成：
 1. component encoders：binary、categorical、continuous、cursor。
 2. component fusion MLP：得到 256 维 tick-level action token。
 3. 两层 micro-action Transformer（dim 256、8 heads、MLP dim 1024）：聚合一个 frame interval 内的 `K` 个 action tick。
-4. projection：输出 768 维 action embedding，与 predictor conditioning dim 相同。
+4. projection：输出 1024 维 action embedding，与 predictor conditioning dim 相同。
 
 Action Encoder 的目标参数量约为 2M；实现完成后以实际 `numel()` 为准，允许在 1.5M–3M 内调整。
 
@@ -314,17 +314,18 @@ Predictor 是一个 causal Transformer，从随机初始化开始训练：
 | 参数 | 默认值 |
 |---|---:|
 | context length | 16 macro steps |
+| input latent dim | 1024 |
 | depth | 24 |
-| model dim | 768 |
-| heads | 12 |
+| model dim | 1024 |
+| heads | 16 |
 | head dim | 64 |
-| MLP hidden dim | 3072 |
-| output dim | 768 |
+| MLP hidden dim | 4096 |
+| output dim | 1024 |
 | dropout | 0.1 |
 | conditioning | per-layer AdaLN-Zero |
-| 参数量 | 约 255M |
+| 参数量 | 约 455M |
 
-输入为 observation latent history 和 action-block embeddings。动作通过每层 AdaLN-Zero 注入；调制层初始化为零，使训练初期不会因随机 action conditioning 破坏视觉 latent，随后逐步学习动作影响。
+输入为 observation latent history 和 action-block embeddings。视觉 latent、action conditioning 和 predictor 内部空间统一为 1024 维，不设置压缩瓶颈；同维度输入/输出投影只承担特征变换。动作通过每层 AdaLN-Zero 注入；调制层初始化为零，使训练初期不会因随机 action conditioning 破坏视觉 latent，随后逐步学习动作影响。
 
 训练使用 causal mask。teacher forcing 下并行预测每个 next latent：
 
@@ -338,26 +339,26 @@ output:  zhat_1 ... zhat_T
 
 ### 5.5 参数预算
 
-`401M` 指实际推理时保留的模型总参数，不包括训练期 EMA 副本、阶段 A masked-video predictor、optimizer state、diagnostic decoder 或可选 IDM head。
+`762M` 指实际推理时保留的模型总参数，不包括训练期 EMA 副本、阶段 A masked-video predictor、optimizer state、diagnostic decoder 或可选 IDM head。
 
 | 推理模块 | 目标参数量 |
 |---|---:|
-| EMA Visual Encoder | 约 144M |
+| EMA Visual Encoder | 约 305M |
 | Action Encoder | 约 2M |
-| Action-Conditioned Predictor | 约 255M |
-| **总计** | **约 401M** |
+| Action-Conditioned Predictor | 约 455M |
+| **总计** | **约 762M** |
 
-允许最终实现落在 390M–415M 范围内，但默认配置以 401M 左右为目标。CI 中增加参数预算测试，防止结构修改后模型无意中变小或膨胀。
+允许最终实现落在 740M–785M 范围内，但默认配置以 762M 左右为目标。CI 中增加参数预算测试，防止结构修改后模型无意中变小或膨胀。
 
 参数与 checkpoint 口径：
 
 | 阶段 | 保存参数 | 可梯度参数 | 说明 |
 |---|---:|---:|---|
-| 阶段 A | 约 309M | 约 165M | online encoder 144M + EMA encoder 144M + visual predictor 22M |
-| 阶段 B | 约 544M | 约 401M | online encoder 144M + EMA encoder 144M + action encoder 2M + action predictor 255M |
-| 最终推理 | 约 401M | 不适用 | 只保留 EMA encoder、action encoder 和 action predictor |
+| 阶段 A | 约 632M | 约 327M | online encoder 305M + EMA encoder 305M + visual predictor 22M |
+| 阶段 B | 约 1.07B | 约 762M | online encoder 305M + EMA encoder 305M + action encoder 2M + action predictor 455M |
+| 最终推理 | 约 762M | 不适用 | 只保留 EMA encoder、action encoder 和 action predictor |
 
-最终推理权重约为 802MB（BF16/FP16）或 1.60GB（FP32）。训练峰值显存主要由 640x360 长 clip activation、AdamW state 和 EMA 副本决定，不能只根据权重文件大小估算。
+最终推理权重约为 1.52GB（BF16/FP16）或 3.05GB（FP32）。训练峰值显存主要由 640x360 长 clip activation、AdamW state 和 EMA 副本决定，不能只根据权重文件大小估算。
 
 ### 5.6 SIGReg
 
@@ -724,7 +725,7 @@ MCWM/
 - action mask 对 padding 生效。
 - SIGReg FP32 且有有限梯度。
 - one-step 与 autoregressive rollout shape/语义一致。
-- 默认 deploy graph 参数量必须在 390M–415M；EMA 训练副本和阶段 A predictor 不得被误计入推理模型。
+- 默认 deploy graph 参数量必须在 740M–785M；EMA 训练副本和阶段 A predictor 不得被误计入推理模型。
 
 ### 10.3 Checkpoint 测试
 
@@ -791,7 +792,7 @@ MCWM/
 | 第一人称部分可观测 | 相同画面对应不同世界状态 | 16-step context；后续引入 memory/hierarchy |
 | 数据来源偏差 | latent 按 recorder/source 聚类 | source-balanced sampler 和分桶验证 |
 | GUI 与世界控制混杂 | 非法规划动作 | GUI mode 显式编码、macro-action 合法性 mask |
-| 训练规模超预算 | 约 401M 推理模型、640×360 长 clip 成本过高 | 2-frame tubelet、20×20 patch、visible-token encoder、bf16、Flash Attention、activation checkpointing、FSDP/ZeRO、sharded cache |
+| 训练规模超预算 | 约 762M 推理模型、640×360 长 clip 成本过高 | 2-frame tubelet、20×20 patch、visible-token encoder、bf16、Flash Attention、activation checkpointing、FSDP/ZeRO、sharded cache |
 
 ## 13. 实现时必须保持的原则
 

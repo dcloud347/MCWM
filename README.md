@@ -49,7 +49,7 @@ accumulation steps, giving an effective batch of 64 clips. The generic
 `configs/pretrain_visual.yaml` remains available for other GPU counts.
 Both configurations keep the formal 640x360 input and follow V-JEPA's video
 sampling contract: each video access chooses one random 16-frame clip and
-samples it at 4 FPS from frame timestamps. They use a 20-layer Video ViT encoder with
+samples it at 4 FPS from frame timestamps. They use a 24-layer Video ViT-Large encoder with
 2-frame tubelets, joint spatiotemporal attention, 3D RoPE, bf16, FSDP, EMA, and
 W&B logging. Formal configurations disable activation checkpointing.
 Masking follows the V-JEPA 2 two-group setup: one prediction task unions eight
@@ -57,8 +57,8 @@ Masking follows the V-JEPA 2 two-group setup: one prediction task unions eight
 blocks, and their per-sample losses are averaged equally.
 Formal training uses 300 optimizer iterations per epoch and defaults to 150
 epochs (45,000 steps), with 600 warmup steps.
-The checked parameter counts are 143,602,944 per visual encoder and 21,886,080
-for the M1 predictor (309,091,968 parameters saved during phase A).
+The checked parameter counts are 304,770,048 per visual encoder and 22,082,944
+for the M1 predictor (631,623,040 parameters saved during phase A).
 With one CUDA process the same configuration automatically runs without a
 distributed wrapper. Use `wandb.mode=offline` in the YAML on a host without
 network access, or pass `--wandb-mode offline`, then sync that run later.

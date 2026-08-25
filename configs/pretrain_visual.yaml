@@ -24,10 +24,10 @@ model:
   patch_size: 20
   tubelet_size: 2
   use_rope: true
-  encoder_dim: 768
-  encoder_depth: 20
-  encoder_heads: 12
-  encoder_mlp_dim: 3072
+  encoder_dim: 1024
+  encoder_depth: 24
+  encoder_heads: 16
+  encoder_mlp_dim: 4096
   predictor_dim: 384
   predictor_depth: 12
   predictor_heads: 12

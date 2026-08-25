@@ -14,12 +14,12 @@ class M1ParameterBudgetTest(unittest.TestCase):
     def test_base_config_matches_design_budget(self):
         repository = Path(__file__).resolve().parents[2]
         config = load_yaml_config(repository / "configs" / "pretrain_visual.yaml")
-        # Meta tensors contain shapes but allocate no ~1 GB FP32 weights.
+        # Meta tensors contain shapes but allocate no ~2.5 GB FP32 weights.
         with torch.device("meta"):
             model = build_visual_jepa(config)
         encoder = sum(parameter.numel() for parameter in model.target_encoder.parameters())
         predictor = sum(parameter.numel() for parameter in model.predictor.parameters())
         total = sum(parameter.numel() for parameter in model.parameters())
-        self.assertEqual(encoder, 143_602_944)
-        self.assertEqual(predictor, 21_886_080)
-        self.assertEqual(total, 309_091_968)
+        self.assertEqual(encoder, 304_770_048)
+        self.assertEqual(predictor, 22_082_944)
+        self.assertEqual(total, 631_623_040)

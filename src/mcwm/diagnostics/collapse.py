@@ -24,7 +24,7 @@ def collapse_metrics(latents: Tensor, *, prefix: str = "latent") -> Dict[str, fl
     """把最后一维以外的维度视为样本，衡量 latent 多样性。
 
     即使训练使用 bf16，这里的计算也强制转成 FP32。effective rank 由中心化样本
-    矩阵的奇异值计算；诊断 batch 较小时，不必总是构造 768×768 covariance。
+    矩阵的奇异值计算；诊断 batch 较小时，不必总是构造 feature_dim² covariance。
     """
 
     if latents.ndim < 2:
