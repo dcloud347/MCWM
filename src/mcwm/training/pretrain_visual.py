@@ -114,6 +114,29 @@ def _training_signature(config: Mapping[str, Any]) -> str:
     return json.dumps(signature, sort_keys=True, separators=(",", ":"))
 
 
+def _progress_bar(completed: int, total: int, *, width: int = 24) -> str:
+    """Render a fixed-width progress bar suitable for redirected text logs."""
+
+    if total <= 0:
+        return "[" + "-" * width + "]"
+    fraction = min(max(completed / total, 0.0), 1.0)
+    filled = min(width, int(fraction * width))
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def _format_duration(seconds: float) -> str:
+    """Format an elapsed duration compactly for progress logs."""
+
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{seconds:02d}s"
+    if minutes:
+        return f"{minutes:d}m{seconds:02d}s"
+    return f"{seconds:d}s"
+
+
 def _seed_everything(seed: int) -> None:
     """统一设置各随机数生成器；不同 rank 会传入不同 seed。"""
 
@@ -478,6 +501,7 @@ def validate(
     device: torch.device,
     precision: str,
     batches: int,
+    progress_label: str = "validation",
 ) -> Tuple[Dict[str, float], Optional[list]]:
     """计算固定 mask 的 validation loss、collapse 指标和 W&B 诊断图。"""
 
@@ -487,6 +511,16 @@ def validate(
     gaps = []
     visuals = None
     validation_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    try:
+        total_batches = min(batches, len(loader))
+    except TypeError:
+        total_batches = batches
+    progress_every = max(1, total_batches // 10)
+    if validation_rank == 0:
+        print(
+            f"[{progress_label}] {_progress_bar(0, total_batches)} 0/{total_batches}",
+            flush=True,
+        )
     mask_generator = torch.Generator().manual_seed(9100 + validation_rank)
     for batch_index, batch in enumerate(loader):
         if batch_index >= batches:
@@ -505,6 +539,17 @@ def validate(
                 output["target"],
                 prediction_indices=output["prediction_indices"],
                 grid_size=_unwrapped(model).config.encoder.grid_size,
+            )
+        completed_batches = batch_index + 1
+        if validation_rank == 0 and (
+            completed_batches % progress_every == 0
+            or completed_batches == total_batches
+        ):
+            print(
+                f"[{progress_label}] "
+                f"{_progress_bar(completed_batches, total_batches)} "
+                f"{completed_batches}/{total_batches}",
+                flush=True,
             )
     if not losses:
         raise ValueError("validation loader produced no batches")
@@ -770,6 +815,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
             device=device,
             precision=str(config["precision"]),
             batches=int(config["validation"]["batches"]),
+            progress_label="baseline",
         )
         logger.log(
             {
@@ -788,6 +834,14 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     )
     model.train()
     last_checkpoint = output_dir / f"checkpoint-{optimizer_step:08d}.pt"
+    training_started = time.perf_counter()
+    starting_optimizer_step = optimizer_step
+    if rank == 0:
+        print(
+            f"[train] {_progress_bar(optimizer_step, total_steps)} "
+            f"{optimizer_step}/{total_steps}",
+            flush=True,
+        )
     try:
         while optimizer_step < total_steps:
             step_started = time.perf_counter()
@@ -946,6 +1000,22 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                         device,
                     )
                 logger.log(metrics, step=optimizer_step)
+                if rank == 0:
+                    completed_this_run = optimizer_step - starting_optimizer_step
+                    average_step_seconds = (
+                        (time.perf_counter() - training_started) / completed_this_run
+                    )
+                    eta_seconds = (total_steps - optimizer_step) * average_step_seconds
+                    percentage = 100.0 * optimizer_step / total_steps
+                    print(
+                        f"[train] {_progress_bar(optimizer_step, total_steps)} "
+                        f"{optimizer_step}/{total_steps} ({percentage:5.1f}%) "
+                        f"loss={metrics['train/loss']:.5f} "
+                        f"step={metrics['system/step_seconds']:.2f}s "
+                        f"clips/s={metrics['system/clips_per_second']:.2f} "
+                        f"eta={_format_duration(eta_seconds)}",
+                        flush=True,
+                    )
 
             if optimizer_step % int(config["validation"]["every_steps"]) == 0:
                 metrics, visuals = validate(
@@ -954,6 +1024,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                     device=device,
                     precision=str(config["precision"]),
                     batches=int(config["validation"]["batches"]),
+                    progress_label=f"validation step {optimizer_step}",
                 )
                 collapse_config = config["collapse"]
                 alerts = (

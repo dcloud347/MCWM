@@ -55,15 +55,16 @@ optimizer:
   weight_decay: 0.05
   gradient_clip: 1.0
   effective_batch_size: 64
-  # 总 optimizer steps = iterations_per_epoch × epochs。
+  # 总 optimizer steps = iterations_per_epoch × epochs = 18,000。
   iterations_per_epoch: 300
-  epochs: 25
-  warmup_steps: 100
+  epochs: 60
+  # 保持原 100/7,500 的 warmup 比例。
+  warmup_steps: 240
   ema_start: 0.999
   ema_end: 0.999
 validation:
-  # 每个 epoch 验证一次；连续多次 collapse 才中止，避免单次误报。
-  every_steps: 300
+  # 每 600 step（2 个 epoch）验证一次；连续多次 collapse 才中止。
+  every_steps: 600
   batches: 32
   collapse_check: true
 collapse:
@@ -72,8 +73,8 @@ collapse:
   maximum_pairwise_cosine: 0.999
   patience_validations: 3
 checkpoint:
-  # resume 时会校验数据 manifest hash 和关键训练配置。
-  every_steps: 300
+  # 每 600 step 保存一次；resume 会校验数据 manifest hash 和关键训练配置。
+  every_steps: 600
   keep_last: 3
   resume: null
 distributed:

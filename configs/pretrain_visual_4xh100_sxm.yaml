@@ -12,8 +12,8 @@ data:
   clip_frames: 16
   sample_fps: 4
   clips_per_video: 1
-  # 每张 H100 一次处理 4 个 clip；四张卡的 global micro-batch 是 16。
-  batch_size: 4
+  # 每张 H100 一次处理 8 个 clip；四张卡的 global micro-batch 是 32。
+  batch_size: 8
   # workers 是每个训练进程的数量，因此整机最多会有 32 个解码 worker。
   workers: 8
   # 按数据源反频率有放回抽取 batch 中的视频。
@@ -33,7 +33,7 @@ model:
   predictor_depth: 12
   predictor_heads: 12
   predictor_mlp_dim: 1536
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 mask:
   # V-JEPA 2 的两套 multi-block mask；每个 block 都贯穿整个 clip。
   - spatial_scale: [0.15, 0.15]
@@ -54,16 +54,18 @@ optimizer:
   learning_rate: 0.0001
   weight_decay: 0.05
   gradient_clip: 1.0
-  # 4 clips/GPU x 4 GPUs x 4 accumulation steps = 64 clips。
+  # 8 clips/GPU x 4 GPUs x 2 accumulation steps = 64 clips。
   effective_batch_size: 64
-  # 总 optimizer steps = iterations_per_epoch x epochs = 7,500。
+  # 总 optimizer steps = iterations_per_epoch x epochs = 18,000。
   iterations_per_epoch: 300
-  epochs: 25
-  warmup_steps: 100
+  epochs: 60
+  # 保持原 100/7,500 的 warmup 比例。
+  warmup_steps: 240
   ema_start: 0.999
   ema_end: 0.999
 validation:
-  every_steps: 300
+  # 每 600 step（2 个 epoch）验证一次。
+  every_steps: 600
   batches: 32
   collapse_check: true
 collapse:
@@ -72,8 +74,8 @@ collapse:
   maximum_pairwise_cosine: 0.999
   patience_validations: 3
 checkpoint:
-  # 每 300 step 保存一次，只保留最近 3 份常规 checkpoint。
-  every_steps: 300
+  # 每 600 step 保存一次，只保留最近 3 份常规 checkpoint。
+  every_steps: 600
   keep_last: 3
   resume: null
 distributed:
