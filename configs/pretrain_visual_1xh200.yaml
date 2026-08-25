@@ -64,8 +64,8 @@ optimizer:
   ema_start: 0.999
   ema_end: 0.999
 validation:
-  # 每 600 step（2 个 epoch）验证一次。
-  every_steps: 600
+  # 每 1,800 step（6 个 epoch）验证一次。
+  every_steps: 1800
   batches: 32
   collapse_check: true
 collapse:
@@ -74,8 +74,8 @@ collapse:
   maximum_pairwise_cosine: 0.999
   patience_validations: 3
 checkpoint:
-  # 每 600 step 保存一次，只保留最近 3 份常规 checkpoint。
-  every_steps: 600
+  # 每 1,800 step 保存一次，只保留最近 3 份常规 checkpoint。
+  every_steps: 1800
   keep_last: 3
   resume: null
 distributed:
