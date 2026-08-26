@@ -1,4 +1,4 @@
-"""训练指标始终写本地 JSONL，并可由 rank 0 同步到 W&B。"""
+"""把训练指标写到本地，并可选同步到 W&B。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 
 class TrainingLogger:
-    """一个很薄的日志层；W&B 故障不会让本地训练记录消失。"""
+    """统一管理本地日志和 W&B；W&B 故障不影响本地记录。"""
 
     def __init__(
         self,
@@ -25,7 +25,7 @@ class TrainingLogger:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.local_path = self.output_dir / "metrics.jsonl"
         self.wandb_run = None
-        # 多卡时只有 rank 0 创建 W&B run，避免每张卡产生一个实验。
+        # 多卡训练只让主进程连接 W&B，避免重复创建实验。
         if self.rank != 0 or not wandb_config.get("enabled", True):
             return
         mode = str(wandb_config.get("mode", "online"))
@@ -51,14 +51,18 @@ class TrainingLogger:
 
     @property
     def run_id(self) -> Optional[str]:
+        """返回当前 W&B 实验 ID；未启用时返回 None。"""
+
         return getattr(self.wandb_run, "id", None)
 
     @property
     def run_name(self) -> Optional[str]:
+        """返回当前 W&B 实验名称；未启用时返回 None。"""
+
         return getattr(self.wandb_run, "name", None)
 
     def log(self, metrics: Mapping[str, Any], *, step: int) -> None:
-        """以 optimizer step 为横轴，同时写 JSONL 和 W&B。"""
+        """按 optimizer step 把指标写入本地和 W&B。"""
 
         if self.rank != 0:
             return
@@ -79,7 +83,7 @@ class TrainingLogger:
                 warnings.warn(f"W&B logging failed at step {step}: {exc}")
 
     def log_images(self, key: str, images: Sequence[Any], *, step: int) -> None:
-        """只向 W&B 上传固定验证样本的小型诊断图。"""
+        """把验证诊断图上传到 W&B。"""
 
         if self.rank != 0 or self.wandb_run is None:
             return
@@ -91,6 +95,8 @@ class TrainingLogger:
             warnings.warn(f"W&B image logging failed at step {step}: {exc}")
 
     def finish(self) -> None:
+        """关闭本地日志文件和 W&B 连接。"""
+
         if self.wandb_run is not None:
             try:
                 self.wandb_run.finish()

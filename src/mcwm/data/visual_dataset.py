@@ -1,4 +1,4 @@
-"""从 M0 canonical episode store 中读取时序连续的视频 clip。"""
+"""从统一数据集中读取时间连续的视频片段。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ SampleIndex = Union[int, Tuple[int, int]]
 
 @dataclass(frozen=True)
 class VisualEpisodeRef:
-    """一个 episode 的轻量索引；每次访问时随机选择 clip。"""
+    """一段视频的轻量索引；真正读取时再随机选择 clip。"""
 
     episode_id: str
     video_path: Path
@@ -34,7 +34,7 @@ class VisualEpisodeRef:
 
 
 def _resolve_video_path(root: Path, manifest: EpisodeManifest) -> Path:
-    """同时兼容相对数据集根目录和相对 episode 目录的视频路径。"""
+    """找到视频文件，同时兼容两种常见的相对路径写法。"""
 
     configured = Path(manifest.video_path)
     if configured.is_absolute():
@@ -51,7 +51,7 @@ def _resolve_video_path(root: Path, manifest: EpisodeManifest) -> Path:
 
 
 def decode_frames_at_timestamps(path: Path, timestamps_ms: Sequence[int]) -> Tensor:
-    """seek 到 clip 附近并按精确 PTS 解码，绝不静默 resize。"""
+    """跳到 clip 附近并按准确时间戳解码，不自动改变分辨率。"""
 
     try:
         import av  # type: ignore
@@ -216,14 +216,14 @@ class CanonicalVisualDataset(Dataset):
 
 
 def _seeded_index(index: int, *, seed: int, epoch: int, draw: int) -> Tuple[int, int]:
-    """Attach a deterministic random-clip seed to one sampled video index."""
+    """为一个视频索引生成可复现的随机 clip 种子。"""
 
     clip_seed = (seed * 1_000_003 + epoch * 1_000_000_007 + draw) % (2**63 - 1)
     return index, clip_seed
 
 
 class ResumableSampler(Sampler[SampleIndex]):
-    """每个 epoch 都可复现，并能从 epoch 内精确位置恢复的 sampler。"""
+    """可复现地打乱单卡数据，并支持从 epoch 中间继续。"""
 
     def __init__(
         self,
@@ -244,9 +244,13 @@ class ResumableSampler(Sampler[SampleIndex]):
         return self.full_length - self.start_index
 
     def set_epoch(self, epoch: int) -> None:
+        """设置当前 epoch，确保每轮使用对应的打乱顺序。"""
+
         self.epoch = int(epoch)
 
     def set_start_index(self, start_index: int) -> None:
+        """设置本轮开始位置，用于断点续训。"""
+
         if not 0 <= start_index <= self.full_length:
             raise ValueError("sampler start_index is out of range")
         self.start_index = int(start_index)
@@ -277,7 +281,7 @@ class ResumableSampler(Sampler[SampleIndex]):
 
 
 class DistributedResumableSampler(Sampler[SampleIndex]):
-    """支持确定性 epoch 和精确 offset resume 的多卡随机 sampler。"""
+    """可复现地分配多卡数据，并支持从 epoch 中间继续。"""
 
     def __init__(
         self,
@@ -303,9 +307,13 @@ class DistributedResumableSampler(Sampler[SampleIndex]):
         return self.full_length - self.start_index
 
     def set_epoch(self, epoch: int) -> None:
+        """设置当前 epoch，确保所有进程使用对应的数据顺序。"""
+
         self.epoch = int(epoch)
 
     def set_start_index(self, start_index: int) -> None:
+        """设置本轮开始位置，用于多卡断点续训。"""
+
         if not 0 <= start_index <= self.full_length:
             raise ValueError("sampler start_index is out of range")
         self.start_index = int(start_index)
@@ -314,7 +322,7 @@ class DistributedResumableSampler(Sampler[SampleIndex]):
         generator = torch.Generator().manual_seed(self.seed + self.epoch)
         indices = torch.randperm(self.dataset_length, generator=generator).tolist()
         total = self.full_length * self.world_size
-        # 补齐到每个 rank 样本数一致，防止某张卡提前结束造成 collective 卡死。
+        # 每张卡必须拿到相同数量的样本，否则先结束的卡会让其他卡一直等待。
         if len(indices) < total:
             indices.extend(indices[: total - len(indices)])
         per_rank = indices[self.rank:total:self.world_size]

@@ -1,4 +1,4 @@
-"""V-JEPA 2 风格的 tubelet Video ViT visual encoder。"""
+"""把视频切成时空 patch，再用 Video ViT 编码。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .layers import TransformerBlock
 
 @dataclass(frozen=True)
 class VisualEncoderConfig:
-    """Video ViT 配置；正式模型固定使用 360×640 和 20×20 spatial patch。"""
+    """Video ViT 的输入大小和网络结构配置。"""
 
     image_height: int = 360
     image_width: int = 640
@@ -48,37 +48,39 @@ class VisualEncoderConfig:
 
     @property
     def grid_size(self) -> Tuple[int, int]:
-        """Spatial tubelet 网格的 (行数, 列数)，正式配置为 (18, 32)。"""
+        """每个时间片的 patch 行数和列数，正式配置为 (18, 32)。"""
 
         return self.image_height // self.patch_size, self.image_width // self.patch_size
 
     @property
     def temporal_grid_size(self) -> int:
-        """正式16帧、tubelet size 2 对应8个时间位置。"""
+        """时间方向的 token 数；16 帧每 2 帧一组时结果是 8。"""
 
         return self.clip_frames // self.tubelet_size
 
     @property
     def token_grid_size(self) -> Tuple[int, int, int]:
+        """返回 token 网格的时间、行和列。"""
+
         rows, columns = self.grid_size
         return self.temporal_grid_size, rows, columns
 
     @property
     def patch_count(self) -> int:
-        """每个时间 tubelet 的空间 token 数，正式配置为576。"""
+        """每个时间位置的 patch 数，正式配置是 18×32=576。"""
 
         rows, columns = self.grid_size
         return rows * columns
 
     @property
     def token_count(self) -> int:
-        """整个 clip 的时空 token 数，正式配置为8×576=4608。"""
+        """整个视频片段的 token 数，正式配置是 8×576=4608。"""
 
         return math.prod(self.token_grid_size)
 
 
 class VisualEncoder(nn.Module):
-    """用非重叠 Conv3d tubelet 和联合时空 self-attention 编码完整 clip。"""
+    """切分不重叠的时空 patch，并用注意力层编码。"""
 
     def __init__(self, config: VisualEncoderConfig) -> None:
         super().__init__()
@@ -106,7 +108,7 @@ class VisualEncoder(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        """使用官方 ViT 初始化并按层深缩放 residual 输出投影。"""
+        """初始化模型参数，并缩小较深层的残差输出。"""
 
         for module in self.modules():
             if isinstance(module, (nn.Linear, nn.Conv3d)):
@@ -135,7 +137,8 @@ class VisualEncoder(nn.Module):
                 "clips must have shape "
                 f"[B, {expected[0]}, {expected[1]}, {expected[2]}, {expected[3]}]"
             )
-        # Conv3d 接受 [B, C, T, H, W]，输出按 T/H/W 顺序展平成 video tokens。
+        # Conv3d 输入顺序是 [batch, 通道, 时间, 高, 宽]。
+        # 输出按时间、行、列的顺序展平，必须与 mask 的 token 编号保持一致。
         return self.patch_embedding(clips.permute(0, 2, 1, 3, 4)).flatten(2).transpose(1, 2)
 
     def forward_features(
@@ -143,7 +146,7 @@ class VisualEncoder(nn.Module):
         clips: Tensor,
         token_indices: Optional[Tensor] = None,
     ) -> Tensor:
-        """编码完整 token 序列，或只编码 ``token_indices`` 指定的 context。"""
+        """编码全部 token，或只编码 ``token_indices`` 指定的可见 token。"""
 
         tokens = self._tokenize(clips)
         batch = tokens.shape[0]
@@ -174,5 +177,7 @@ class VisualEncoder(nn.Module):
         *,
         return_patch_tokens: bool = False,
     ) -> Tensor:
+        """返回每个 patch 的特征，或返回所有 patch 的平均特征。"""
+
         tokens = self.forward_features(clips, token_indices)
         return tokens if return_patch_tokens else tokens.mean(dim=1)

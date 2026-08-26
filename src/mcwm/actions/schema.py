@@ -1,4 +1,4 @@
-"""Source-independent action contract used by MCWM datasets."""
+"""定义所有数据来源共同使用的 Minecraft 动作格式。"""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ INTERACTION_NAMES: Tuple[str, ...] = (
 
 
 class ActionSource(str, Enum):
-    """Data source after normalization to the MC 1.16.5 contract."""
+    """动作数据的原始来源。"""
 
     VPT = "vpt"
     MINERL = "minerl"
@@ -152,7 +152,11 @@ class CanonicalActionTick:
         )
 
     def movement_value(self, name: str) -> bool:
+        """返回指定移动按键当前是否按住。"""
+
         return self.movement[MOVEMENT_NAMES.index(name)]
 
     def interaction_value(self, name: str) -> bool:
+        """返回指定交互按键当前是否按住。"""
+
         return self.interaction[INTERACTION_NAMES.index(name)]

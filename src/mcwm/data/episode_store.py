@@ -1,4 +1,4 @@
-"""Atomic, zero-dependency reference episode store for milestone M0."""
+"""安全地保存和读取 M0 episode 数据。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ from .manifest import (
 
 @dataclass(frozen=True)
 class StoredEpisode:
+    """从磁盘读出的完整 episode。"""
+
     manifest: EpisodeManifest
     frame_timestamps_ms: Tuple[int, ...]
     actions: Tuple[CanonicalActionTick, ...]
@@ -29,8 +31,8 @@ class StoredEpisode:
 class EpisodeStore:
     """保存 episode 元数据和动作，视频只保存路径，不重复复制大文件。
 
-    M0 默认写 JSONL，这样不安装第三方库也能读写。安装 pyarrow 后可以通过
-    ``export_parquet`` 导出正式训练管线使用的 Parquet。
+    动作默认写成 JSONL，不安装额外依赖也能读取。安装 pyarrow 后还可以
+    导出为 Parquet。
     """
 
     def __init__(self, root: Path) -> None:
@@ -38,6 +40,8 @@ class EpisodeStore:
         self.episodes_dir = self.root / "episodes"
 
     def episode_dir(self, episode_id: str) -> Path:
+        """返回 episode 目录，并拒绝不安全的目录名。"""
+
         if not episode_id or "/" in episode_id or ".." in episode_id:
             raise ValueError("episode_id must be a safe path component")
         return self.episodes_dir / episode_id
@@ -70,9 +74,8 @@ class EpisodeStore:
         if destination.exists():
             raise FileExistsError(f"episode already exists: {destination}")
 
-        # Build the complete episode beside its final location. Directory rename is
-        # atomic on the same filesystem, so an interrupted ingest never publishes a
-        # manifest without its actions and frame timestamps.
+        # 先在临时目录写完全部文件，再一次性移动到正式位置。
+        # 即使写入中断，也不会留下缺少动作或时间戳的不完整 episode。
         with tempfile.TemporaryDirectory(
             prefix=f".{manifest.episode_id}.", dir=self.episodes_dir
         ) as temporary:
@@ -103,7 +106,7 @@ class EpisodeStore:
         return StoredEpisode(manifest, timestamps, actions, audit)
 
     def read_frame_timestamps(self, episode_id: str) -> Tuple[int, ...]:
-        """Read and validate frame PTS without loading the much larger action stream."""
+        """只读取并检查帧时间戳，不加载体积更大的动作数据。"""
 
         source = self.episode_dir(episode_id)
         manifest = read_episode_manifest(source / "manifest.json")
@@ -116,6 +119,8 @@ class EpisodeStore:
         return timestamps
 
     def list_manifests(self) -> Tuple[EpisodeManifest, ...]:
+        """按目录名顺序列出所有 episode 的 manifest。"""
+
         if not self.episodes_dir.exists():
             return ()
         manifests = [
@@ -125,11 +130,15 @@ class EpisodeStore:
         return tuple(manifests)
 
     def write_dataset_manifest(self) -> DatasetManifest:
+        """根据现有 episode 重建并写入数据集总 manifest。"""
+
         manifest = DatasetManifest(self.list_manifests())
         manifest.write(self.root / "dataset_manifest.json")
         return manifest
 
     def export_parquet(self, episode_id: str, path: Optional[Path] = None) -> Path:
+        """把一个 episode 的动作导出成 Parquet 文件。"""
+
         try:
             import pyarrow as pa  # type: ignore
             import pyarrow.parquet as pq  # type: ignore

@@ -1,4 +1,4 @@
-"""Small deterministic M0 fixture dataset."""
+"""生成小型且可复现的 M0 测试数据集。"""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def _vpt_row(timestamp: int, **updates: Any) -> Dict[str, Any]:
 
 
 def build_fixture_store(root: Path) -> EpisodeStore:
-    """Create two canonical episodes without requiring video codecs."""
+    """创建两个统一格式的 episode，不需要安装视频解码器。"""
 
     store = EpisodeStore(root)
 
@@ -105,4 +105,3 @@ def build_fixture_store(root: Path) -> EpisodeStore:
     store.write_episode(minerl_manifest, minerl_times, minerl_actions)
     store.write_dataset_manifest()
     return store
-

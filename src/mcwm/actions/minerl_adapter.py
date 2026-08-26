@@ -1,4 +1,4 @@
-"""Adapter for the near-human MineRL 1.0 environment action dictionary."""
+"""把 MineRL 1.0 动作字典转换成项目统一格式。"""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from .schema import (
 )
 
 
-# MineRL 使用 dict 表示动作，这张表说明每个键要写进 canonical action 的哪一组。
-# 例如 raw["sneak"] == 1 会变成 movement 里的 sneak=True。
+# 这张表说明 MineRL 的每个按键应该放进统一动作的哪个字段。
+# 例如 sneak=1 会变成 movement 里的 sneak=True。
 MINERL_BINARY_KEYS = {
     "forward": ("movement", "forward"),
     "back": ("movement", "back"),
@@ -34,7 +34,7 @@ MINERL_BINARY_KEYS = {
 
 
 def _camera(values: Sequence[object]) -> Tuple[float, float]:
-    # MineRL 已经给出角度增量，不需要像 VPT 原始鼠标位移那样乘缩放系数。
+    # MineRL 已经使用角度，不需要再换算鼠标移动距离。
     if len(values) != 2:
         raise ValueError("MineRL camera must be [pitch_delta, yaw_delta]")
     result = tuple(float(value) for value in values)
@@ -51,9 +51,9 @@ def minerl_action_to_canonical(
     cursor: Optional[Tuple[float, float]] = None,
     label_confidence: float = 1.0,
 ) -> CanonicalActionTick:
-    """把一条 MineRL 1.0 action dict 转成统一格式。
+    """把一条 MineRL 1.0 动作转换成统一格式。
 
-    这里只处理普通 Python dict，因此做离线数据预处理时不需要启动 MineRL。
+    输入只是普通字典，因此离线处理数据时不需要启动 MineRL。
     """
 
     movement = {name: False for name in MOVEMENT_NAMES}
@@ -62,7 +62,7 @@ def minerl_action_to_canonical(
         value = bool(raw.get(raw_name, 0))
         (movement if group == "movement" else interaction)[canonical_name] = value
 
-    # MineRL 数据可能使用 hotbar.1 ... hotbar.9，也可能直接给 hotbar 数字。
+    # 快捷栏可能由 hotbar.1 等按键表示，也可能直接给出槽位数字。
     selected_slots = [
         slot for slot in range(1, 10) if bool(raw.get(f"hotbar.{slot}", 0))
     ]

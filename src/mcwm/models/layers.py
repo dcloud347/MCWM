@@ -1,4 +1,4 @@
-"""模型共用的 Transformer 基础模块，attention 使用 PyTorch 原生 SDPA。"""
+"""模型共用的 Transformer 层和位置编码。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from torch.nn import functional as F
 
 
 def _rotate_half(values: Tensor) -> Tensor:
-    """把最后一维相邻的实部/虚部旋转九十度。"""
+    """把最后一维中每对相邻数字旋转九十度。"""
 
     paired = values.unflatten(-1, (-1, 2))
     first, second = paired.unbind(dim=-1)
@@ -19,7 +19,7 @@ def _rotate_half(values: Tensor) -> Tensor:
 
 
 def _apply_rotary(values: Tensor, positions: Tensor) -> Tensor:
-    """对一段偶数维 head channel 应用一维 RoPE。"""
+    """根据一维位置给 attention 的一部分通道加入旋转位置编码。"""
 
     channels = values.shape[-1]
     if channels == 0:
@@ -31,8 +31,8 @@ def _apply_rotary(values: Tensor, positions: Tensor) -> Tensor:
     )
     frequencies = 1.0 / (10000.0 ** (frequencies / (channels / 2)))
     angles = positions.to(dtype=values.dtype).unsqueeze(-1) * frequencies
-    # V-JEPA 2 原版把整段频率复制两次，而不是逐元素 repeat_interleave。
-    # 这个排列看起来反直觉，但属于官方 checkpoint 的 RoPE 约定。
+    # V-JEPA 2 会把整组频率复制一次。虽然这种排列不直观，但为了和官方
+    # 模型的行为一致，这里不能改成逐个频率重复。
     cosine = angles.cos().repeat(1, 1, 2).unsqueeze(1)
     sine = angles.sin().repeat(1, 1, 2).unsqueeze(1)
     return values * cosine + _rotate_half(values) * sine
@@ -44,7 +44,7 @@ def _apply_3d_rope(
     position_ids: Tensor,
     grid_size: Tuple[int, int, int],
 ) -> Tuple[Tensor, Tensor]:
-    """按官方 V-JEPA 2 的 channel 划分分别旋转时间、高度和宽度。"""
+    """把通道分成三组，分别加入时间、行和列的位置。"""
 
     _, _, _, head_dim = query.shape
     axis_dim = 2 * ((head_dim // 3) // 2)
@@ -72,10 +72,9 @@ def _apply_3d_rope(
 
 
 class Attention(nn.Module):
-    """多头自注意力。
+    """多头自注意力层。
 
-    在 CUDA、数据类型和 tensor 布局都满足条件时，PyTorch 会自动选择
-    Flash Attention；不满足时会自动回退，不需要我们维护两套实现。
+    条件合适时 PyTorch 会自动使用更快的 Flash Attention，否则使用普通实现。
     """
 
     def __init__(
@@ -104,8 +103,10 @@ class Attention(nn.Module):
         *,
         is_causal: bool = False,
     ) -> Tensor:
+        """计算自注意力，并在启用时加入位置编码。"""
+
         batch, tokens, dim = inputs.shape
-        # 先得到 Q/K/V，再拆成 [batch, heads, tokens, head_dim]。
+        # 把 Q、K、V 拆成 [batch, 注意力头, token, 每头维度]。
         qkv = self.qkv(inputs).reshape(batch, tokens, 3, self.heads, self.head_dim)
         query, key, value = qkv.unbind(dim=2)
         query = query.transpose(1, 2)
@@ -137,7 +138,7 @@ class Attention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """encoder 和 predictor 共用的 Pre-LN Transformer block。"""
+    """encoder 和 predictor 共用的 Transformer 基本层。"""
 
     def __init__(
         self,
@@ -170,6 +171,8 @@ class TransformerBlock(nn.Module):
         inputs: Tensor,
         position_ids: Optional[Tensor] = None,
     ) -> Tensor:
+        """依次计算注意力和前馈网络。"""
+
         inputs = inputs + self.attention(
             self.attention_norm(inputs),
             position_ids,

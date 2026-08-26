@@ -1,4 +1,4 @@
-"""Adapter for OpenAI VPT contractor JSONL actions."""
+"""把 VPT contractor 的 JSONL 动作转换成项目统一格式。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from .schema import (
 # VPT 记录的是鼠标 dx/dy，不是角度。官方数据约定每个原始单位等于 0.15 度。
 CAMERA_SCALER = 360.0 / 2400.0
 
-# 少数 recorder 版本在 GUI 打开时使用了不同的鼠标缩放，需要按版本修正。
+# 少数录制器版本在 GUI 打开时使用不同的鼠标比例，需要单独修正。
 GUI_CAMERA_VERSION_SCALERS = {
     "5.7": 0.5,
     "5.8": 0.5,
@@ -50,11 +50,10 @@ def _clamp_camera(value: object) -> float:
 
 
 class VPTActionAdapter:
-    """把 VPT contractor JSONL 逐条转换成统一动作。
+    """按顺序把 VPT JSONL 记录转换成统一动作。
 
-    这个 adapter 必须按时间顺序复用同一个实例，因为 hotbar 恢复和
-    stuck-attack 修复都需要记住上一条记录的状态。每个新 episode 要调用
-    ``reset()``，或者新建一个 adapter。
+    转换器需要记住上一条记录，才能修复快捷栏和攻击键。因此同一段视频要
+    复用一个实例，并在开始下一段视频前调用 ``reset()``。
     """
 
     def __init__(
@@ -90,14 +89,15 @@ class VPTActionAdapter:
         *,
         timestamp_ms: Optional[int] = None,
     ) -> CanonicalActionTick:
+        """转换一条 VPT 记录，并更新当前 episode 的状态。"""
+
         keyboard = raw.get("keyboard") or {}
         mouse = raw.get("mouse") or {}
         keys = list(keyboard.get("keys") or [])
         new_buttons = list(mouse.get("newButtons") or [])
         buttons = set(mouse.get("buttons") or [])
 
-        # 部分 VPT 文件开头会出现假的“左键一直按住”。这里按官方逻辑修复，
-        # 并把修复写入 repairs，方便之后审计，而不是静默修改数据。
+        # 部分文件开头会错误地显示左键一直按住。修复后留下记录，方便审计。
         if self._step_index == 0 and new_buttons == [0]:
             self._attack_stuck = True
             self.repairs.append("stuck_attack_detected_at_episode_start")
@@ -174,4 +174,6 @@ class VPTActionAdapter:
         return action
 
     def adapt_many(self, rows: Iterable[Mapping[str, Any]]) -> List[CanonicalActionTick]:
+        """按输入顺序转换多条 VPT 记录。"""
+
         return [self.adapt(row) for row in rows]

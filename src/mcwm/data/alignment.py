@@ -1,4 +1,4 @@
-"""Align action timestamps to adjacent video frame PTS boundaries."""
+"""按时间戳把动作分配到相邻视频帧之间。"""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ class ActionBlock:
 
 @dataclass(frozen=True)
 class AlignmentResult:
+    """动作与视频帧对齐后的结果和边界外动作。"""
+
     blocks: Tuple[ActionBlock, ...]
     actions_before_first_frame: Tuple[CanonicalActionTick, ...]
     actions_at_or_after_last_frame: Tuple[CanonicalActionTick, ...]

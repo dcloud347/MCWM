@@ -1,4 +1,4 @@
-"""M1/M2 共用的 latent collapse 量化诊断。"""
+"""检查模型特征是否变得过于相似，也就是发生表征坍塌。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from torch.nn import functional as F
 
 @dataclass(frozen=True)
 class CollapseThresholds:
-    """连续多次超过这些阈值时，训练会保存 failure checkpoint。"""
+    """判断特征坍塌时使用的阈值。"""
 
     minimum_average_std: float = 0.01
     minimum_effective_rank: float = 4.0
@@ -21,10 +21,10 @@ class CollapseThresholds:
 
 @torch.no_grad()
 def collapse_metrics(latents: Tensor, *, prefix: str = "latent") -> Dict[str, float]:
-    """把最后一维以外的维度视为样本，衡量 latent 多样性。
+    """计算一组指标，判断特征是否仍然有足够差异。
 
-    即使训练使用 bf16，这里的计算也强制转成 FP32。effective rank 由中心化样本
-    矩阵的奇异值计算；诊断 batch 较小时，不必总是构造 feature_dim² covariance。
+    最后一维是特征，其余维度都当作样本。即使训练使用 bf16，这里也转成
+    FP32，以免诊断指标受到低精度影响。
     """
 
     if latents.ndim < 2:
@@ -79,7 +79,7 @@ def find_collapse_alerts(
     *,
     prefix: str = "latent",
 ) -> Tuple[str, ...]:
-    """把指标转换成简单、可写入日志的报警原因。"""
+    """根据阈值把异常指标转换成容易阅读的报警信息。"""
 
     checks = (
         ("average_std", lambda value: value < thresholds.minimum_average_std, "std too low"),
@@ -106,7 +106,7 @@ def find_collapse_alerts(
 
 @torch.no_grad()
 def online_target_gap(online: Tensor, target: Tensor) -> float:
-    """用 cosine distance 监测 online 与 EMA 表征相差多远。"""
+    """用余弦距离衡量 online encoder 和 EMA encoder 的差异。"""
 
     if online.shape != target.shape:
         raise ValueError("online and target latents must have matching shapes")

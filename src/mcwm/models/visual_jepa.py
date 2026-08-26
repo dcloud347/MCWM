@@ -1,4 +1,4 @@
-"""M1 Minecraft 视觉预训练：V-JEPA 2 风格 online、predictor 和 EMA target。"""
+"""M1 视觉预训练模型：用可见视频内容预测被遮住位置的特征。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .visual_predictor import VisualPredictor, VisualPredictorConfig
 
 @dataclass(frozen=True)
 class VisualJEPAConfig:
-    """把 video encoder、predictor、mask 和像素归一化配置组合在一起。"""
+    """组合 encoder、predictor、mask 和图像归一化配置。"""
 
     encoder: VisualEncoderConfig
     predictor: VisualPredictorConfig
@@ -28,7 +28,7 @@ class VisualJEPAConfig:
 
 
 def _indices_from_mask(mask: Tensor) -> Tuple[Tensor, Tensor]:
-    """像官方 collator 一样，把 batch 内 context/target 裁到共同最短长度。"""
+    """取出可见和待预测位置，并让同一 batch 的长度保持一致。"""
 
     if mask.ndim != 2:
         raise ValueError("flattened mask must have shape [B, N]")
@@ -45,7 +45,7 @@ def _indices_from_mask(mask: Tensor) -> Tuple[Tensor, Tensor]:
 
 
 class VisualJEPA(nn.Module):
-    """用可见 video tokens 预测被 mask 的 EMA target tokens。"""
+    """用可见视频 token 预测 EMA encoder 在被遮住位置的特征。"""
 
     def __init__(self, config: VisualJEPAConfig) -> None:
         super().__init__()
@@ -66,12 +66,14 @@ class VisualJEPA(nn.Module):
         self.register_buffer("pixel_std", torch.tensor(config.pixel_std).view(1, 1, 3, 1, 1))
 
     def train(self, mode: bool = True) -> "VisualJEPA":
+        """切换训练模式，但 EMA encoder 始终保持评估模式。"""
+
         super().train(mode)
         self.target_encoder.eval()
         return self
 
     def normalize_frames(self, frames: Tensor) -> Tensor:
-        """磁盘 uint8 或 [0,1] float 都统一归一化后再进入 encoder。"""
+        """把 uint8 或 [0,1] 浮点图像转换成 encoder 使用的数值范围。"""
 
         if frames.dtype == torch.uint8:
             frames = frames.float().div_(255.0)
@@ -89,6 +91,8 @@ class VisualJEPA(nn.Module):
         mask_generator: Optional[torch.Generator] = None,
         online_frames: Optional[Tensor] = None,
     ) -> Dict[str, object]:
+        """生成 mask、预测目标特征并返回 loss 和诊断数据。"""
+
         if frames.ndim != 5:
             raise ValueError("frames must have shape [B, T, 3, H, W]")
         batch, clip_frames = frames.shape[:2]
@@ -122,12 +126,15 @@ class VisualJEPA(nn.Module):
 
         flat_masks = target_mask.flatten(2)
         grouped_indices = tuple(_indices_from_mask(group_mask) for group_mask in flat_masks)
+        # target_mask 是最初采样的区域。为了让同一 batch 能组成规则张量，
+        # _indices_from_mask 可能会裁掉少量位置。prediction_mask 只标记最后
+        # 真正送入 predictor 并参与 loss 的位置，日志和诊断图应使用它。
         prediction_mask = torch.zeros_like(flat_masks)
         for group_index, (_, prediction_indices) in enumerate(grouped_indices):
             prediction_mask[group_index].scatter_(1, prediction_indices, True)
         prediction_mask = prediction_mask.reshape_as(target_mask)
 
-        # 完整 clip 的 target 只编码一次；官方训练在 encoder norm 后再做 feature LN。
+        # EMA encoder 只需完整编码一次，之后各组 mask 从结果中选择目标位置。
         with torch.no_grad():
             target_flat = self.target_encoder(
                 target_frames,
@@ -180,6 +187,6 @@ class VisualJEPA(nn.Module):
 
     @torch.no_grad()
     def update_target(self, momentum: float) -> None:
-        """optimizer step 完成后调用一次；micro-step 中不能调用。"""
+        """每次 optimizer 更新后同步一次 EMA encoder。"""
 
         update_ema(self.online_encoder, self.target_encoder, momentum)

@@ -1,4 +1,4 @@
-"""M1 visual JEPA 训练入口：正式训练优先使用 CUDA。"""
+"""M1 视觉模型的完整训练流程。"""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ from .logging import TrainingLogger
 
 
 class SyntheticVideoDataset(Dataset):
-    """可复现的移动图案，只用于 smoke test，绝不能产出正式 checkpoint。"""
+    """生成可复现的移动图案，只用于快速测试训练流程。"""
 
     def __init__(self, length: int, frames: int, height: int, width: int, seed: int) -> None:
         self.length = length
@@ -79,7 +79,7 @@ class SyntheticVideoDataset(Dataset):
 
 
 def _git_commit() -> str:
-    """记录当前 commit；未处于 Git 仓库时使用明确的占位值。"""
+    """返回当前 Git commit；读取不到时返回占位值。"""
 
     try:
         result = subprocess.run(
@@ -94,7 +94,7 @@ def _git_commit() -> str:
 
 
 def _training_signature(config: Mapping[str, Any]) -> str:
-    """这些配置必须不变，才能把训练继续写进同一个 W&B run。"""
+    """计算关键配置的签名，用来判断 checkpoint 是否可以安全续训。"""
 
     data = dict(config["data"])
     for operational_key in ("root", "workers"):
@@ -112,7 +112,7 @@ def _training_signature(config: Mapping[str, Any]) -> str:
 
 
 def _progress_bar(completed: int, total: int, *, width: int = 24) -> str:
-    """Render a fixed-width progress bar suitable for redirected text logs."""
+    """生成固定宽度的文本进度条。"""
 
     if total <= 0:
         return "[" + "-" * width + "]"
@@ -122,7 +122,7 @@ def _progress_bar(completed: int, total: int, *, width: int = 24) -> str:
 
 
 def _format_duration(seconds: float) -> str:
-    """Format an elapsed duration compactly for progress logs."""
+    """把秒数转换成简短、易读的时间。"""
 
     seconds = max(0, int(round(seconds)))
     hours, remainder = divmod(seconds, 3600)
@@ -135,7 +135,7 @@ def _format_duration(seconds: float) -> str:
 
 
 def _seed_everything(seed: int) -> None:
-    """统一设置各随机数生成器；不同 rank 会传入不同 seed。"""
+    """设置所有随机种子；多卡时每个进程使用不同种子。"""
 
     random.seed(seed)
     np.random.seed(seed)
@@ -145,7 +145,7 @@ def _seed_everything(seed: int) -> None:
 
 
 def _distributed_context(strategy: str, requested_device: str) -> Tuple[int, int, int, torch.device]:
-    """根据 torchrun 环境变量初始化进程组并确定当前设备。"""
+    """初始化多卡通信，并确定当前进程使用的设备。"""
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -173,7 +173,7 @@ def _wrap_distributed(
     world_size: int,
     precision: str,
 ) -> nn.Module:
-    """单卡不包装；多卡根据配置使用 DDP 或分层 auto-wrap 的 FSDP。"""
+    """单卡直接返回模型，多卡则按配置包装成 DDP 或 FSDP。"""
 
     model.to(device)
     if world_size == 1:
@@ -196,7 +196,7 @@ def _wrap_distributed(
             if precision == "fp16"
             else torch.float32
         )
-        # 超过 1M 参数的子模块会单独 shard，避免每次 forward 同时聚合全部权重。
+        # 大模块单独切分，避免一次前向计算聚合全部模型权重。
         return FSDP(
             model,
             use_orig_params=True,
@@ -217,7 +217,7 @@ def _wrap_distributed(
 
 
 def _unwrapped(model: nn.Module) -> VisualJEPA:
-    """从 DDP/FSDP wrapper 中取出原始 VisualJEPA。"""
+    """从多卡包装中取出原始 VisualJEPA 模型。"""
 
     module = getattr(model, "module", model)
     if not isinstance(module, VisualJEPA):
@@ -226,13 +226,13 @@ def _unwrapped(model: nn.Module) -> VisualJEPA:
 
 
 def _update_target(model: nn.Module, strategy: str, world_size: int, momentum: float) -> None:
-    """每个 optimizer step 后只更新一次 EMA target。"""
+    """每次参数更新后同步一次 EMA encoder。"""
 
     if world_size > 1 and strategy == "fsdp":
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-        # EMA 按名字配对完整参数，所以 FSDP 下要临时召回完整权重。
-        # 这里只在 optimizer step 后执行，不会在 accumulation micro-step 中执行。
+        # FSDP 平时把参数分散在各卡上，更新 EMA 前需要临时取得完整参数。
+        # 梯度累积期间不更新，只在 optimizer 真正更新参数后执行一次。
         with FSDP.summon_full_params(model, recurse=True, writeback=True):
             _unwrapped(model).update_target(momentum)
     else:
@@ -253,7 +253,7 @@ def _save_checkpoint(
     world_size: int,
     training_state: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    """保存单卡/DDP/FSDP 状态；多卡还会保存每个 rank 的独立 RNG。"""
+    """保存模型和训练状态；多卡还会保存各进程的随机状态。"""
 
     if world_size > 1:
         rng_states = [None for _ in range(world_size)]
@@ -269,7 +269,7 @@ def _save_checkpoint(
             StateDictType,
         )
 
-        # 写盘的是可移植的 full state dict，而不是依赖当前 world size 的碎片。
+        # 保存完整权重，恢复时可以使用不同数量的 GPU。
         with FSDP.state_dict_type(
             model,
             StateDictType.FULL_STATE_DICT,
@@ -322,7 +322,7 @@ def _load_checkpoint(
     rank: int,
     world_size: int,
 ) -> Dict[str, Any]:
-    """加载 checkpoint，并把 full optimizer state 重新切给当前 FSDP ranks。"""
+    """加载 checkpoint，并把优化器状态重新分配给当前各张 GPU。"""
 
     if world_size > 1 and strategy == "fsdp":
         from torch.distributed.fsdp import (
@@ -361,7 +361,7 @@ def _load_checkpoint(
 
 
 def _autocast_context(device: torch.device, precision: str):
-    """fp32 不开 autocast；bf16/fp16 使用对应设备的 autocast。"""
+    """根据精度配置返回合适的自动混合精度环境。"""
 
     if precision == "fp32":
         return nullcontext()
@@ -370,7 +370,7 @@ def _autocast_context(device: torch.device, precision: str):
 
 
 def _augment_clip(frames: Tensor, config: Mapping[str, Any]) -> Tensor:
-    """只增强 online 分支；同一 clip 的所有帧使用一致颜色扰动。"""
+    """只增强 online 分支，并让同一视频的所有帧使用相同颜色变化。"""
 
     if not config.get("enabled", False):
         return frames
@@ -398,7 +398,7 @@ def _augment_clip(frames: Tensor, config: Mapping[str, Any]) -> Tensor:
 
 
 def _learning_rate_lambda(step: int, *, warmup: int, total: int) -> float:
-    """先线性 warmup，再做 cosine decay。"""
+    """学习率先线性升高，再平缓下降。"""
 
     if warmup > 0 and step < warmup:
         return max(step, 1) / warmup
@@ -408,7 +408,7 @@ def _learning_rate_lambda(step: int, *, warmup: int, total: int) -> float:
 
 
 def _total_optimizer_steps(optimizer_config: Mapping[str, Any]) -> int:
-    """Convert the configured epochs into an optimizer-step budget."""
+    """把 epoch 数换算成 optimizer 总步数。"""
 
     epochs = float(optimizer_config["epochs"])
     iterations_per_epoch = int(optimizer_config["iterations_per_epoch"])
@@ -421,7 +421,7 @@ def _infinite_batches(
     consumed_batches: int,
     batch_size: int,
 ) -> Iterator[Mapping[str, Any]]:
-    """无限遍历 DataLoader，并从 checkpoint 对应的 epoch/offset 接着取。"""
+    """循环读取 batch，并能从 checkpoint 记录的位置继续。"""
 
     sampler = loader.sampler
     full_length = int(getattr(sampler, "full_length", len(sampler)))
@@ -440,7 +440,7 @@ def _infinite_batches(
 
 
 def _distributed_mean(value: float, device: torch.device) -> float:
-    """把每个 rank 的标量平均成全局指标。"""
+    """把各张 GPU 上的数值平均成一个全局指标。"""
 
     result = torch.tensor(value, device=device, dtype=torch.float64)
     if torch.distributed.is_initialized():
@@ -456,7 +456,7 @@ def _parameter_norm(
     device: torch.device,
     fsdp_sharded: bool,
 ) -> float:
-    """计算全局参数 L2 norm；FSDP 下先汇总各 rank 的参数碎片。"""
+    """计算全部模型参数的 L2 范数。"""
 
     squared = torch.zeros((), device=device, dtype=torch.float64)
     for parameter in parameters:
@@ -467,7 +467,7 @@ def _parameter_norm(
 
 
 def _gather_equal_shape(tensor: Tensor) -> Tensor:
-    """收集各 rank 同形状 tensor，供全局 collapse 诊断使用。"""
+    """收集各张 GPU 上的同形状张量，用于全局诊断。"""
 
     if not torch.distributed.is_initialized():
         return tensor
@@ -477,7 +477,7 @@ def _gather_equal_shape(tensor: Tensor) -> Tensor:
 
 
 def _grouped_online_target_gap(output: Mapping[str, Any]) -> float:
-    """比较每套 mask 的可见 online token 与相同位置的完整 EMA target。"""
+    """比较可见位置上 online encoder 和 EMA encoder 的特征。"""
 
     target = output["target"].flatten(1, 2)
     gaps = []
@@ -500,7 +500,7 @@ def validate(
     batches: int,
     progress_label: str = "validation",
 ) -> Tuple[Dict[str, float], Optional[list]]:
-    """计算固定 mask 的 validation loss、collapse 指标和 W&B 诊断图。"""
+    """运行验证，计算 loss、坍塌指标和诊断图。"""
 
     model.eval()
     losses = []
@@ -566,7 +566,7 @@ def validate(
 
 
 def _prune_checkpoints(output_dir: Path, keep_last: int) -> None:
-    """只删除当前 output_dir 中超过保留数量的常规 checkpoint。"""
+    """只保留指定数量的最新常规 checkpoint。"""
 
     if keep_last <= 0:
         return
@@ -583,7 +583,7 @@ def _make_loaders(
     rank: int,
     world_size: int,
 ) -> Tuple[DataLoader, DataLoader, str]:
-    """构建真实 canonical 或 synthetic smoke-test DataLoader。"""
+    """创建真实数据或快速测试数据的 DataLoader。"""
 
     data = config["data"]
     model = config["model"]
@@ -747,7 +747,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     collapse_bad_validations = 0
     resume_payload = None
     if resume_path:
-        # 先恢复所有状态，再创建 logger，才能继续使用 checkpoint 内的 W&B run ID。
+        # 先恢复 checkpoint，之后日志器才能继续使用原来的 W&B 实验。
         resume_payload = _load_checkpoint(
             Path(resume_path),
             model=model,
@@ -853,7 +853,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                 current_sample_ids.extend(str(value) for value in batch.get("sample_id", []))
                 frames = batch["frames"].to(device, non_blocking=True)
                 synchronized = micro_step == accumulation_steps - 1
-                # 除最后一个 micro-step 外不做梯度同步，减少多卡通信次数。
+                # 梯度累积的中间步骤不做多卡同步，减少通信开销。
                 sync_context = (
                     nullcontext()
                     if synchronized or not hasattr(model, "no_sync")
@@ -879,7 +879,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                 gradient_norm = torch.nn.utils.clip_grad_norm_(
                     trainable, float(optimizer_config["gradient_clip"])
                 )
-            # 任意 rank 出现 NaN/Inf 时，所有 rank 一起保存 failure checkpoint 并退出。
+            # 任意 GPU 出现无效数值时，所有进程一起保存现场并停止。
             finite_step = torch.tensor(
                 int(math.isfinite(accumulated_loss) and bool(torch.isfinite(gradient_norm))),
                 device=device,
@@ -1110,6 +1110,8 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
 
 
 def main() -> None:
+    """读取命令行参数并启动视觉预训练。"""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/pretrain_visual.yaml"))
     parser.add_argument("--data-root", type=Path)

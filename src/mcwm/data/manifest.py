@@ -1,4 +1,4 @@
-"""Versioned episode and dataset manifests with leakage-safe splits."""
+"""记录数据集索引，并安全地划分训练、验证和测试集。"""
 
 from __future__ import annotations
 
@@ -56,20 +56,28 @@ class EpisodeManifest:
 
     @property
     def duration_ms(self) -> int:
+        """返回 episode 持续的毫秒数。"""
+
         return self.end_timestamp_ms - self.start_timestamp_ms
 
     def to_dict(self) -> Dict[str, Any]:
+        """转换成可写入 JSON 的字典。"""
+
         data = asdict(self)
         data["source"] = self.source.value
         return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "EpisodeManifest":
+        """从字典创建 episode manifest。"""
+
         return cls(**dict(data))
 
 
 @dataclass(frozen=True)
 class DatasetManifest:
+    """整个数据集的 episode 列表和格式版本。"""
+
     episodes: Tuple[EpisodeManifest, ...]
     schema_version: int = MANIFEST_SCHEMA_VERSION
 
@@ -82,10 +90,14 @@ class DatasetManifest:
 
     @property
     def content_hash(self) -> str:
+        """返回内容哈希，用来确认训练前后数据集没有变化。"""
+
         payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         return sha256(payload.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> Dict[str, Any]:
+        """转换成可写入 JSON 的字典。"""
+
         return {
             "schema_version": self.schema_version,
             "episodes": [episode.to_dict() for episode in self.episodes],
@@ -93,16 +105,22 @@ class DatasetManifest:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "DatasetManifest":
+        """从字典创建数据集 manifest。"""
+
         return cls(
             episodes=tuple(EpisodeManifest.from_dict(item) for item in data["episodes"]),
             schema_version=data.get("schema_version", MANIFEST_SCHEMA_VERSION),
         )
 
     def write(self, path: Path) -> None:
+        """安全地写入数据集 manifest。"""
+
         _atomic_json_write(Path(path), self.to_dict())
 
     @classmethod
     def read(cls, path: Path) -> "DatasetManifest":
+        """从 JSON 文件读取数据集 manifest。"""
+
         with Path(path).open("r", encoding="utf-8") as handle:
             return cls.from_dict(json.load(handle))
 
@@ -117,7 +135,7 @@ def _atomic_json_write(path: Path, data: Mapping[str, Any]) -> None:
 
 
 def _connected_groups(episodes: Sequence[EpisodeManifest]) -> List[List[EpisodeManifest]]:
-    """把 session 或 world 有关联的 episode 放入同一组，防止数据泄漏。"""
+    """把相同 session 或 world 的 episode 放在一组，避免数据泄漏。"""
 
     groups: List[List[EpisodeManifest]] = []
     for episode in episodes:
@@ -147,7 +165,7 @@ def assign_splits(
     test: float = 0.05,
     seed: str = "mcwm-v1",
 ) -> Tuple[EpisodeManifest, ...]:
-    """按关联组切分数据；同一 session/world 永远不会横跨两个 split。"""
+    """按关联组切分数据，保证相关 episode 不会出现在不同集合。"""
 
     ratios = (train, validation, test)
     if any(value < 0 for value in ratios) or abs(sum(ratios) - 1.0) > 1e-9:
@@ -176,7 +194,7 @@ def assign_splits(
 
 
 def find_split_leakage(episodes: Iterable[EpisodeManifest]) -> Tuple[str, ...]:
-    """检查 train/validation/test 是否共享了同一 session 或 world。"""
+    """检查训练、验证和测试集是否共享 session 或 world。"""
 
     issues: List[str] = []
     for field in ("session_id", "world_id"):
@@ -192,9 +210,13 @@ def find_split_leakage(episodes: Iterable[EpisodeManifest]) -> Tuple[str, ...]:
 
 
 def write_episode_manifest(path: Path, manifest: EpisodeManifest) -> None:
+    """安全地写入 episode manifest。"""
+
     _atomic_json_write(Path(path), manifest.to_dict())
 
 
 def read_episode_manifest(path: Path) -> EpisodeManifest:
+    """从 JSON 文件读取 episode manifest。"""
+
     with Path(path).open("r", encoding="utf-8") as handle:
         return EpisodeManifest.from_dict(json.load(handle))

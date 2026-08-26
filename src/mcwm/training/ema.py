@@ -1,4 +1,4 @@
-"""EMA target 更新和 momentum 调度。"""
+"""更新 EMA encoder，并计算每一步使用的平滑系数。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from torch import nn
 
 @torch.no_grad()
 def update_ema(online: nn.Module, target: nn.Module, momentum: float) -> None:
-    """严格执行一次 ``target = m*target + (1-m)*online``。"""
+    """用 online 参数平滑更新 target 参数。"""
 
     if not 0.0 <= momentum <= 1.0:
         raise ValueError("EMA momentum must be between 0 and 1")
@@ -21,7 +21,7 @@ def update_ema(online: nn.Module, target: nn.Module, momentum: float) -> None:
     for name, target_value in target_parameters.items():
         target_value.lerp_(online_parameters[name].detach(), 1.0 - momentum)
 
-    # 如果以后加入 BatchNorm 等 buffer，直接复制，不能像参数一样做平均。
+    # BatchNorm 等额外状态不能做参数平均，遇到时直接复制。
     online_buffers = dict(online.named_buffers())
     target_buffers = dict(target.named_buffers())
     if online_buffers.keys() != target_buffers.keys():
@@ -31,7 +31,7 @@ def update_ema(online: nn.Module, target: nn.Module, momentum: float) -> None:
 
 
 def cosine_ema_momentum(step: int, total_steps: int, start: float, end: float = 1.0) -> float:
-    """让 momentum 从 start 按 cosine 逐渐接近 end。"""
+    """让 EMA 平滑系数从 start 平缓变化到 end。"""
 
     if total_steps <= 0:
         raise ValueError("total_steps must be positive")

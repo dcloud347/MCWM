@@ -1,4 +1,4 @@
-"""Data quality reports for canonical MCWM episode stores."""
+"""检查统一数据集的质量并生成报告。"""
 
 from __future__ import annotations
 
@@ -48,6 +48,8 @@ def _active_names(action: CanonicalActionTick) -> List[str]:
 
 
 def audit_episode(episode: StoredEpisode, *, max_frame_gap_ms: int = 250) -> Dict[str, Any]:
+    """统计一段 episode 的动作、时间间隔和数据问题。"""
+
     actions = episode.actions
     movement = Counter()
     interaction = Counter()
@@ -111,6 +113,8 @@ def audit_episode(episode: StoredEpisode, *, max_frame_gap_ms: int = 250) -> Dic
 
 
 def audit_store(root: Path, *, max_frame_gap_ms: int = 250) -> Dict[str, Any]:
+    """检查数据集中的所有 episode，并汇总问题。"""
+
     store = EpisodeStore(root)
     manifests = store.list_manifests()
     episode_reports = [
@@ -139,6 +143,8 @@ def audit_store(root: Path, *, max_frame_gap_ms: int = 250) -> Dict[str, Any]:
 
 
 def main(argv: Sequence[str] = None) -> int:
+    """运行数据检查命令并输出 JSON 报告。"""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, help="Canonical episode store root")
     parser.add_argument("--output", type=Path, help="Write JSON report to this path")
@@ -156,4 +162,3 @@ def main(argv: Sequence[str] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

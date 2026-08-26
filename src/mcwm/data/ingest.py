@@ -1,4 +1,4 @@
-"""Dependency-free ingestion of action JSONL plus externally extracted frame PTS."""
+"""读取动作和视频帧时间戳，生成统一格式的 episode。"""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from .video import probe_video
 
 
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """读取 JSONL，并确保每个非空行都是 JSON 对象。"""
+
     rows: List[Dict[str, Any]] = []
     with Path(path).open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -29,6 +31,8 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
 
 
 def read_frame_timestamps(path: Path) -> Tuple[int, ...]:
+    """读取严格递增的毫秒级帧时间戳。"""
+
     with Path(path).open("r", encoding="utf-8") as handle:
         value = json.load(handle)
     if isinstance(value, dict):
@@ -42,6 +46,8 @@ def read_frame_timestamps(path: Path) -> Tuple[int, ...]:
 
 
 def file_sha256(path: Path) -> str:
+    """分块计算文件的 SHA-256，避免一次读入整个文件。"""
+
     digest = sha256()
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -93,6 +99,8 @@ def ingest_vpt_episode(
     frame_timestamps_path: Optional[Path] = None,
     split: str = None,
 ) -> EpisodeManifest:
+    """导入一段 VPT 数据并更新数据集 manifest。"""
+
     rows = read_jsonl(action_path)
     adapter = VPTActionAdapter(recorder_version=recorder_version)
     actions = adapter.adapt_many(rows)
@@ -135,6 +143,8 @@ def ingest_minerl_episode(
     frame_timestamps_path: Optional[Path] = None,
     split: str = None,
 ) -> EpisodeManifest:
+    """导入一段 MineRL 数据并更新数据集 manifest。"""
+
     rows = read_jsonl(action_path)
     actions: List[CanonicalActionTick] = []
     for row in rows:

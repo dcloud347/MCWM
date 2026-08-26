@@ -1,4 +1,4 @@
-"""读取并校验 M1 YAML，再构建完全由配置决定的模型。"""
+"""读取训练配置，检查参数并创建 M1 模型。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from mcwm.models.visual_predictor import VisualPredictorConfig
 
 
 def load_yaml_config(path: Path) -> Dict[str, Any]:
-    """读取 YAML；未安装训练依赖时给出明确安装提示。"""
+    """读取 YAML 配置；缺少依赖时给出安装提示。"""
 
     try:
         import yaml  # type: ignore
@@ -36,7 +36,7 @@ def _float_pair(values: Any, name: str) -> Tuple[float, float]:
 
 
 def _parse_mask_config(value: Any) -> MaskConfig:
-    """读取与 V-JEPA 2 官方 YAML 同形状的 mask generator 列表。"""
+    """把 YAML 中的 mask 列表转换成模型配置。"""
 
     if (
         not isinstance(value, Sequence)
@@ -74,7 +74,7 @@ def _parse_mask_config(value: Any) -> MaskConfig:
 
 
 def validate_pretrain_config(config: Mapping[str, Any]) -> None:
-    """尽早拒绝缺字段、错误精度和无效训练间隔。"""
+    """在开始训练前检查必填字段和参数范围。"""
 
     required_sections = {
         "data",
@@ -138,7 +138,7 @@ def validate_pretrain_config(config: Mapping[str, Any]) -> None:
 
 
 def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:
-    """从 resolved config 构建 M1 模型，不读取任何外部权重。"""
+    """只根据配置创建新的 M1 模型，不加载外部权重。"""
 
     validate_pretrain_config(config)
     model = config["model"]
@@ -172,6 +172,6 @@ def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:
 
 
 def resolved_copy(config: Mapping[str, Any]) -> Dict[str, Any]:
-    """返回可安全写入 JSON、W&B 和 checkpoint 的普通深拷贝。"""
+    """返回可写入日志和 checkpoint 的独立配置副本。"""
 
     return deepcopy(dict(config))

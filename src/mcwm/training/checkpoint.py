@@ -1,4 +1,4 @@
-"""原子写入并严格检查 provenance 的训练 checkpoint。"""
+"""安全地保存、读取和检查训练 checkpoint。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from torch import nn
 
 @dataclass(frozen=True)
 class CheckpointProvenance:
-    """说明权重从哪里来；MCWM 永远不允许 external_pretrained=True。"""
+    """记录权重来源，防止误用外部预训练权重。"""
 
     git_commit: str
     config: Mapping[str, Any]
@@ -35,7 +35,7 @@ class CheckpointProvenance:
 
 
 def capture_rng_state() -> Dict[str, Any]:
-    """保存 Python、NumPy、PyTorch 以及所有 CUDA 设备的随机状态。"""
+    """保存所有随机数生成器的状态，供断点续训使用。"""
 
     state: Dict[str, Any] = {
         "python": random.getstate(),
@@ -48,7 +48,7 @@ def capture_rng_state() -> Dict[str, Any]:
 
 
 def restore_rng_state(state: Mapping[str, Any]) -> None:
-    """恢复随机状态，使 resume 后的下一步可以和连续训练一致。"""
+    """恢复随机状态，让断点续训和不中断训练保持一致。"""
 
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
@@ -71,7 +71,7 @@ def save_checkpoint(
     optimizer_state_dict: Optional[Mapping[str, Any]] = None,
     rng_state: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    """先写同目录临时文件，成功后再 rename，避免留下半个 checkpoint。"""
+    """先写临时文件，全部成功后再替换正式 checkpoint。"""
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +100,7 @@ def read_checkpoint(
     *,
     expected_manifest_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """读取 checkpoint，并在加载权重前检查版本和数据来源。"""
+    """读取 checkpoint，并先检查格式版本和权重来源。"""
 
     payload = torch.load(Path(path), map_location="cpu", weights_only=False)
     if payload.get("format_version") != 1:
@@ -138,7 +138,7 @@ def load_checkpoint(
     expected_manifest_hash: Optional[str] = None,
     restore_rng: bool = True,
 ) -> Dict[str, Any]:
-    """恢复单卡或 DDP checkpoint 的全部训练状态。"""
+    """恢复模型、优化器、调度器和随机状态。"""
 
     payload = read_checkpoint(path, expected_manifest_hash=expected_manifest_hash)
     model.load_state_dict(payload["model"])
@@ -158,14 +158,14 @@ def load_checkpoint(
 
 
 def export_ema_encoder(checkpoint_path: Path, destination: Path) -> Path:
-    """只导出 MCWM 自己训练的 EMA encoder，供 M2 初始化或部署使用。"""
+    """只导出 EMA encoder，供下一阶段训练或部署使用。"""
 
     try:
         from safetensors.torch import save_file  # type: ignore
     except ImportError as exc:
         raise RuntimeError("encoder export requires `pip install mcwm[train]`") from exc
     payload = read_checkpoint(checkpoint_path)
-    # online encoder 和 M1 predictor 都不属于最终视觉预训练产物。
+    # 最终只需要更稳定的 EMA encoder，不导出 online encoder 和 predictor。
     prefix = "target_encoder."
     encoder_state = {
         name[len(prefix) :]: value.detach().cpu().contiguous()

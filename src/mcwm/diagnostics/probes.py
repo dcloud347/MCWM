@@ -1,4 +1,4 @@
-"""用冻结特征训练的小型 linear probe，只用于验证 M1 表征。"""
+"""用简单线性模型检查冻结后的 M1 特征是否有用。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def ridge_linear_probe(
     task: Literal["regression", "classification"],
     ridge: float = 1e-3,
 ) -> Dict[str, float]:
-    """用确定性的 ridge 闭式解拟合 probe，全程不更新 encoder。"""
+    """拟合带正则的线性模型，全程不更新 encoder。"""
 
     if train_features.ndim != 2 or validation_features.ndim != 2:
         raise ValueError("features must have shape [samples, dimensions]")
@@ -40,7 +40,7 @@ def ridge_linear_probe(
         raise ValueError(f"unsupported probe task: {task}")
 
     if train_x.shape[0] < train_x.shape[1]:
-        # probe 样本少于 ViT 特征维度时，dual form 会便宜很多。
+        # 样本数少于特征维度时，换一种等价公式可以减少计算量。
         identity = torch.eye(train_x.shape[0], device=train_x.device, dtype=train_x.dtype)
         weights = train_x.T @ torch.linalg.solve(
             train_x @ train_x.T + ridge * identity, train_y

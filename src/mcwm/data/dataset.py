@@ -1,4 +1,4 @@
-"""Metadata-only random clip sampling following the V-JEPA data contract."""
+"""只用帧时间戳随机选择连续的视频片段。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def continuous_frame_ranges(
     *,
     max_frame_gap_ms: int = 250,
 ) -> Tuple[Tuple[int, int], ...]:
-    """Return half-open frame ranges separated by timestamp discontinuities."""
+    """按较大的时间断点切分帧，返回左闭右开的连续区间。"""
 
     timestamps = tuple(int(value) for value in frame_timestamps_ms)
     if len(timestamps) < 2:
@@ -40,11 +40,10 @@ def eligible_clip_start_ranges(
     sample_fps: int,
     max_frame_gap_ms: int = 250,
 ) -> Tuple[Tuple[int, int, int], ...]:
-    """Return compact start ranges for timestamp-based fixed-FPS clips.
+    """找出能够完整采样一个固定帧率 clip 的起点范围。
 
-    Each entry is ``(first_start, start_count, continuous_range_end)``. A start
-    is eligible when all ``clip_frames`` sample instants at ``sample_fps`` fit
-    inside the same continuous range.
+    每项是 ``(第一个起点, 起点数量, 连续区间终点)``。一个合格起点必须让
+    clip 的所有采样时刻都落在同一个连续区间中。
     """
 
     if clip_frames < 2:
@@ -57,8 +56,7 @@ def eligible_clip_start_ranges(
         timestamps,
         max_frame_gap_ms=max_frame_gap_ms,
     ):
-        # Compare the requested duration against PTS rather than assuming a
-        # fixed source-video frame rate.
+        # 根据真实帧时间戳判断长度，不能假设源视频帧率固定。
         maximum_start_numerator = (
             timestamps[range_end - 1] * sample_fps
             - (clip_frames - 1) * 1000
@@ -85,7 +83,7 @@ def _clip_frame_indices_at_fps(
     clip_frames: int,
     sample_fps: int,
 ) -> Tuple[int, ...]:
-    """Select the source frame nearest each fixed-FPS sample instant."""
+    """为每个固定帧率采样时刻选择时间最接近的源视频帧。"""
 
     timestamps = frame_timestamps_ms
     selected = [start]
@@ -131,7 +129,7 @@ def random_clip_frame_indices_from_ranges(
     sample_fps: int,
     generator: random.Random,
 ) -> Tuple[int, ...]:
-    """Uniformly sample a start from precomputed eligible ranges."""
+    """从预先算好的所有合格起点中等概率选择一个。"""
 
     total_starts = sum(start_count for _, start_count, _ in eligible_ranges)
     if total_starts <= 0:
@@ -159,7 +157,7 @@ def random_clip_frame_indices(
     generator: random.Random,
     max_frame_gap_ms: int = 250,
 ) -> Tuple[int, ...]:
-    """Uniformly sample one start, then select frames at ``sample_fps`` by PTS."""
+    """随机选择起点，再按时间戳以指定帧率挑选视频帧。"""
 
     eligible_ranges = eligible_clip_start_ranges(
         frame_timestamps_ms,

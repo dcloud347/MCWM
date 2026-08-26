@@ -1,4 +1,4 @@
-"""Canonical Minecraft actions and source adapters."""
+"""统一 Minecraft 动作格式，并转换不同来源的动作数据。"""
 
 from .schema import (
     INTERACTION_NAMES,
@@ -13,4 +13,3 @@ __all__ = [
     "INTERACTION_NAMES",
     "MOVEMENT_NAMES",
 ]
-

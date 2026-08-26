@@ -1,4 +1,4 @@
-"""Optional exact MP4 PTS extraction through PyAV."""
+"""使用 PyAV 读取视频信息和每一帧的准确时间戳。"""
 
 from __future__ import annotations
 
@@ -9,12 +9,16 @@ from typing import Tuple
 
 @dataclass(frozen=True)
 class VideoProbe:
+    """视频分辨率和帧时间戳。"""
+
     width: int
     height: int
     frame_timestamps_ms: Tuple[int, ...]
 
 
 def probe_video(path: Path, *, expected_width: int = 640, expected_height: int = 360) -> VideoProbe:
+    """检查视频分辨率，并读取严格递增的帧时间戳。"""
+
     try:
         import av  # type: ignore
     except ImportError as exc:

@@ -1,4 +1,4 @@
-"""把固定验证样本画成适合上传 W&B 的小型 M1 诊断图。"""
+"""把验证样本画成原图、mask 图和预测误差图。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def visual_pretraining_images(
     prediction_indices: Optional[object] = None,
     grid_size: Tuple[int, int],
 ) -> List[object]:
-    """依次返回原图、mask 叠加图和 latent prediction error 热力图。"""
+    """返回原图、实际预测区域和特征预测误差热力图。"""
 
     try:
         from PIL import Image
@@ -30,7 +30,7 @@ def visual_pretraining_images(
         image_tensor = image_tensor.float().clamp(0, 1).mul(255).byte()
     image = image_tensor.permute(1, 2, 0).numpy()
     rows, columns = grid_size
-    # Multi-block 训练返回 [G, B, T, N]；诊断图展示第一套 mask。
+    # mask 形状是 [组, batch, 时间, patch]；这里只展示第一组和第一帧。
     if target_mask.ndim == 4:
         target_mask = target_mask[0]
     if isinstance(prediction, (tuple, list)):

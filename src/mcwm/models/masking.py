@@ -1,4 +1,4 @@
-"""V-JEPA 2 风格的 multi-block 时空 mask。"""
+"""在视频 patch 网格上生成 V-JEPA 2 风格的块状 mask。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from torch import Tensor
 
 @dataclass(frozen=True)
 class MaskGeneratorConfig:
-    """一组取并集的 3D block mask 参数。"""
+    """一组块状 mask 的大小、形状和数量。"""
 
     spatial_scale: Tuple[float, float]
     temporal_scale: Tuple[float, float]
@@ -41,7 +41,7 @@ class MaskGeneratorConfig:
 
 
 def _default_generators() -> Tuple[MaskGeneratorConfig, ...]:
-    """V-JEPA 2 16-frame pretraining config 中的两组默认 mask。"""
+    """返回 V-JEPA 2 在 16 帧预训练中使用的两组默认 mask。"""
 
     common = {
         "temporal_scale": (1.0, 1.0),
@@ -63,7 +63,7 @@ def _default_generators() -> Tuple[MaskGeneratorConfig, ...]:
 
 @dataclass(frozen=True)
 class MaskConfig:
-    """按顺序保存独立计算 loss 的 multi-block mask 组。"""
+    """保存多组 mask；每组单独预测，最后平均 loss。"""
 
     generators: Tuple[MaskGeneratorConfig, ...] = field(
         default_factory=_default_generators
@@ -75,11 +75,11 @@ class MaskConfig:
 
 
 class SpatiotemporalMaskSampler:
-    """生成 V-JEPA 2 multi-block mask。
+    """生成多组时空块状 mask。
 
-    返回值形状为 ``[G, B, T, H*W]``。``G`` 是配置中的 mask 组数；
-    每组先为整个 batch 抽一个 block 尺寸，再为每个样本独立抽位置，并把该组
-    的所有 block 取并集。``True`` 表示 online encoder 不可见且需要预测。
+    返回形状是 ``[组数, batch, 时间, 每帧 patch 数]``。同组样本使用相同的
+    block 大小，但位置各自随机。多个 block 重叠时取并集。``True`` 表示该
+    patch 不给 online encoder 看，而是交给 predictor 预测。
     """
 
     def __init__(self, grid_size: Tuple[int, int], config: MaskConfig) -> None:
@@ -132,12 +132,11 @@ class SpatiotemporalMaskSampler:
         aspect_ratio: Tuple[float, float],
         generator: Optional[torch.Generator],
     ) -> Tuple[int, int]:
-        """按目标面积在矩形网格中采样可行的整数 block 尺寸。
+        """在矩形 patch 网格上选择最接近目标面积的整数宽高。
 
-        ``aspect_ratio`` 表示 token 网格中的 ``height / width``。先根据目标
-        面积收紧连续宽高比范围，避免先生成越界矩形再裁剪；随后在满足原始
-        宽高比约束的所有整数尺寸中，选择同时最接近目标面积和抽样宽高比的
-        尺寸。面积与宽高比使用对数误差，使放大和缩小受到对称惩罚。
+        ``aspect_ratio`` 是 block 高度除以宽度。代码会检查所有放得下的整数
+        尺寸，选择面积和宽高比都最接近目标的一个，避免宽屏网格把大 block
+        直接裁小。
         """
 
         ratio_low, ratio_high = aspect_ratio
@@ -149,8 +148,7 @@ class SpatiotemporalMaskSampler:
                 generator,
             )
         else:
-            # 很小的离散网格可能无法以目标面积精确满足边界；仍在用户配置的
-            # 范围内抽 ratio，再由下面的整数搜索选择最接近的可行尺寸。
+            # 小网格可能没有完全满足目标面积的矩形，此时选择最接近的尺寸。
             sampled_ratio = self._uniform(aspect_ratio, generator)
 
         candidates = []
@@ -187,7 +185,7 @@ class SpatiotemporalMaskSampler:
         generator: Optional[torch.Generator],
     ) -> Tensor:
         duration, height, width = block_size
-        # 和官方实现一样，若 block 的并集吃掉了全部 context，就重新抽位置。
+        # 如果 mask 遮住了全部 patch，就重新随机位置，确保 encoder 仍有输入。
         for _ in range(100):
             mask = torch.zeros(
                 clip_frames,
@@ -216,6 +214,8 @@ class SpatiotemporalMaskSampler:
         generator: Optional[torch.Generator] = None,
         device: Optional[torch.device] = None,
     ) -> Tensor:
+        """为一个 batch 生成所有 mask 组。"""
+
         if min(batch_size, clip_frames) <= 0:
             raise ValueError("batch_size and clip_frames must be positive")
 
