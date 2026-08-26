@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 import math
 from pathlib import Path
@@ -32,7 +31,6 @@ class VisualEpisodeRef:
     video_path: Path
     frame_timestamps_ms: Tuple[int, ...]
     clip_start_ranges: Tuple[Tuple[int, int, int], ...]
-    source: str
 
 
 def _resolve_video_path(root: Path, manifest: EpisodeManifest) -> Path:
@@ -146,7 +144,6 @@ class CanonicalVisualDataset(Dataset):
                     video_path=_resolve_video_path(self.root, episode_manifest),
                     frame_timestamps_ms=timestamps,
                     clip_start_ranges=clip_start_ranges,
-                    source=episode_manifest.source.value,
                 )
             )
         if not references:
@@ -185,7 +182,6 @@ class CanonicalVisualDataset(Dataset):
                 f"{reference.episode_id}:{frame_indices[0]}-{frame_indices[-1] + 1}"
                 f"@{self.sample_fps}fps"
             ),
-            "source": reference.source,
             "scene_change": scene_change,
         }
         if self.include_probe_labels:
@@ -278,70 +274,6 @@ class ResumableSampler(Sampler[SampleIndex]):
                 for offset, index in enumerate(selected)
             ]
         return iter(selected)
-
-
-def source_balanced_weights(dataset: CanonicalVisualDataset) -> torch.Tensor:
-    counts = Counter(reference.source for reference in dataset.references)
-    return torch.tensor(
-        [1.0 / counts[reference.source] for reference in dataset.references],
-        dtype=torch.double,
-    )
-
-
-class DistributedSourceBalancedSampler(Sampler[SampleIndex]):
-    """先让两种数据源期望采样量相等，再把样本分给不同 rank。"""
-
-    def __init__(
-        self,
-        dataset: CanonicalVisualDataset,
-        *,
-        rank: int,
-        world_size: int,
-        seed: int,
-    ) -> None:
-        if not 0 <= rank < world_size:
-            raise ValueError("rank must be within world_size")
-        self.weights = source_balanced_weights(dataset)
-        self.rank = rank
-        self.world_size = world_size
-        self.seed = seed
-        self.epoch = 0
-        self.samples_per_rank = math.ceil(len(dataset) / world_size)
-        self.full_length = self.samples_per_rank
-        self.start_index = 0
-
-    def __len__(self) -> int:
-        return self.full_length - self.start_index
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
-
-    def set_start_index(self, start_index: int) -> None:
-        if not 0 <= start_index <= self.full_length:
-            raise ValueError("sampler start_index is out of range")
-        self.start_index = int(start_index)
-
-    def __iter__(self) -> Iterator[SampleIndex]:
-        generator = torch.Generator().manual_seed(self.seed + self.epoch)
-        indices = torch.multinomial(
-            self.weights,
-            self.samples_per_rank * self.world_size,
-            replacement=True,
-            generator=generator,
-        )
-        per_rank = indices[self.rank :: self.world_size]
-        selected = per_rank[self.start_index :].tolist()
-        return iter(
-            [
-                _seeded_index(
-                    int(index),
-                    seed=self.seed,
-                    epoch=self.epoch,
-                    draw=(self.start_index + offset) * self.world_size + self.rank,
-                )
-                for offset, index in enumerate(selected)
-            ]
-        )
 
 
 class DistributedResumableSampler(Sampler[SampleIndex]):

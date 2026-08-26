@@ -16,8 +16,6 @@ data:
   batch_size: 16
   # PyAV 当前在 CPU 上按 PTS 解码；按训练机 CPU 核数酌情调整。
   workers: 12
-  # 按数据源反频率有放回抽取 batch 中的视频。
-  source_balanced: true
 model:
   # 固定 640x360 和 20x20 patch；2-frame tubelet 得到 8x18x32=4608 tokens。
   image_height: 360
@@ -90,7 +88,7 @@ wandb:
   project: mcwm
   group: m1-visual-1xh200
   name: null
-  tags: [vpt, minerl1, from-scratch, m1, 1xh200]
+  tags: [vpt, contractor, from-scratch, m1, 1xh200]
   log_every_steps: 10
   diagnostics_every_steps: 200
   log_checkpoints: false

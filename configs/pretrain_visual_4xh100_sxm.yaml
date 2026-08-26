@@ -16,8 +16,6 @@ data:
   batch_size: 16
   # workers 是每个训练进程的数量，因此整机最多会有 32 个解码 worker。
   workers: 8
-  # 按数据源反频率有放回抽取 batch 中的视频。
-  source_balanced: true
 model:
   # 固定 640x360 和 20x20 patch；2-frame tubelet 得到 8x18x32=4608 tokens。
   image_height: 360
@@ -90,7 +88,7 @@ wandb:
   project: mcwm
   group: m1-visual-4xh100-sxm
   name: null
-  tags: [vpt, minerl1, from-scratch, m1, 4xh100, sxm]
+  tags: [vpt, contractor, from-scratch, m1, 4xh100, sxm]
   log_every_steps: 10
   diagnostics_every_steps: 200
   log_checkpoints: false

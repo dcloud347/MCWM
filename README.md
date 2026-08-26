@@ -1,99 +1,287 @@
 # MCWM
 
-Minecraft joint-embedding world model trained from VPT contractor and MineRL 1.0 data.
+MCWM is a from-scratch, joint-embedding world model for Minecraft 1.16.5. It
+learns from first-person RGB video and keyboard/mouse actions without loading
+external pretrained weights.
 
-The repository contains the M0 data contracts and the M1 visual-pretraining implementation. M1 uses a from-scratch tubelet Video ViT, an EMA target encoder with stop-gradient, structured video masks, and a joint spatiotemporal predictor. No pretrained model weights are loaded.
+The repository currently implements the data layer and visual pretraining
+stage: labeled VPT contractor demonstrations are normalized into a
+timestamp-aligned format, then used to train a masked-video JEPA with an EMA
+target encoder. The action-conditioned world model and planning stack are
+specified in [design.md](design.md), but are not implemented yet.
+
+## Project status
+
+| Milestone | Scope                                                                                    | Status                                            |
+|-----------|------------------------------------------------------------------------------------------|---------------------------------------------------|
+| M0        | Canonical actions, ingestion, manifests, alignment, audits, and fixtures                 | Implemented                                       |
+| M1        | From-scratch visual encoder, masked-video predictor, EMA, diagnostics, and checkpointing | Implemented; no trained checkpoint is distributed |
+| M2        | Action encoder and action-conditioned latent predictor                                   | Planned                                           |
+| M3        | Multi-step latent rollout                                                                | Planned                                           |
+| M4        | Online planning smoke test in MineRL (environment only)                                  | Planned                                           |
+
+MCWM is a research codebase under active development, not a pretrained model
+release or a complete Minecraft agent.
+
+**Training data policy:** MCWM uses only labeled VPT contractor
+demonstrations. MineRL/BASALT demonstrations and unlabeled VPT internet videos
+are outside the training-data scope. A future MineRL integration may provide
+an online evaluation environment, but it must not contribute training data.
+
+## What is implemented
+
+- A source-independent action schema covering movement, interaction, hotbar,
+  camera, cursor, GUI state, validity, timestamps, and label confidence.
+- A VPT contractor adapter that preserves real no-op actions.
+- Exact frame/action alignment based on MP4 presentation timestamps (PTS).
+- Leakage-aware dataset manifests grouped by session and world.
+- Dataset auditing and rendered action overlays for manual QA.
+- A Video ViT masked-video JEPA trained entirely from random initialization.
+- EMA target updates, stop-gradient targets, structured spatiotemporal masks,
+  collapse diagnostics, W&B logging, and resumable checkpoints.
+- Frozen linear probes and export of the trained EMA visual encoder.
+
+The formal M1 model uses 16 frames sampled at 4 FPS and keeps the native
+`640x360` Minecraft frame. Its Video ViT-Large encoder has 304,770,048
+parameters; the masked-video predictor has 22,082,944 parameters.
 
 ## Requirements
 
-- Python 3.9+
-- No third-party dependency is required for the M0 core and tests.
-- `pyarrow` is optional for Parquet export.
-- `av` is optional for extracting exact MP4 presentation timestamps.
-- Video decoding/overlay tooling will use the optional `overlay` dependencies.
-- M1 training dependencies are installed with `pip install -e '.[train,test]'`.
+- Python 3.9 or newer
+- PyTorch 2.1 or newer for model training
+- CUDA hardware for formal M1 training
 
-## Run tests
+Install the package and the development/training dependencies:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -e '.[train,test]'
 ```
 
-Model tests are skipped with an explicit message when PyTorch is not installed.
+Optional dependency groups are also available for narrower workflows:
 
-## Build and audit the fixture dataset
+| Extra | Purpose |
+| --- | --- |
+| `train` | PyTorch training, video decoding, W&B, probes, and export |
+| `test` | Test collection with pytest |
+| `video` | Exact MP4 PTS extraction with PyAV |
+| `overlay` | Action-overlay rendering with OpenCV |
+| `parquet` | Canonical action export with PyArrow |
+
+## Quick start
+
+Run the complete test suite:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  python3 -m unittest discover -s tests -v
+```
+
+Tests that require an unavailable optional dependency are skipped with an
+explicit reason.
+
+Build and audit a tiny canonical dataset:
 
 ```bash
 PYTHONPATH=src python3 scripts/build_fixture_dataset.py /tmp/mcwm-fixture
 PYTHONPATH=src python3 scripts/audit_data.py /tmp/mcwm-fixture
 ```
 
-For real MP4 ingestion, install `mcwm[video]`; `prepare_vpt.py` and
-`prepare_minerl1.py` then extract PTS directly when `--frame-timestamps` is omitted.
-
-## M1 visual pretraining
-
-Log in to W&B once on the training host. For one machine with two H100 GPUs,
-use the dedicated configuration:
-
-```bash
-wandb login
-torchrun --standalone --nproc-per-node=2 -m mcwm.training.pretrain_visual \
-  --config configs/pretrain_visual_2xh100.yaml \
-  --data-root /path/to/canonical-dataset \
-  --output-dir /path/to/checkpoints/m1-visual-2xh100
-```
-
-The two-H100 configuration uses a per-GPU batch of 16 and two gradient
-accumulation steps, giving an effective batch of 64 clips. The generic
-`configs/pretrain_visual.yaml` remains available for other GPU counts.
-Both configurations keep the formal 640x360 input and follow V-JEPA's video
-sampling contract: each video access chooses one random 16-frame clip and
-samples it at 4 FPS from frame timestamps. They use a 24-layer Video ViT-Large encoder with
-2-frame tubelets, joint spatiotemporal attention, 3D RoPE, bf16, FSDP, EMA, and
-W&B logging. Formal configurations disable activation checkpointing.
-Masking follows the V-JEPA 2 two-group setup: one prediction task unions eight
-15% full-duration spatial blocks, the other unions two 70% full-duration
-blocks, and their per-sample losses are averaged equally.
-Formal training uses 300 optimizer iterations per epoch and defaults to 150
-epochs (45,000 steps), with 600 warmup steps.
-The checked parameter counts are 304,770,048 per visual encoder and 22,082,944
-for the M1 predictor (631,623,040 parameters saved during phase A).
-With one CUDA process the same configuration automatically runs without a
-distributed wrapper. Use `wandb.mode=offline` in the YAML on a host without
-network access, or pass `--wandb-mode offline`, then sync that run later.
-
-Run a CPU smoke test with the tiny configuration (this is not a valid formal
-checkpoint):
+Run the deterministic two-step CPU training smoke test:
 
 ```bash
 PYTHONPATH=src python3 scripts/pretrain_visual.py \
-  --config configs/pretrain_visual_tiny.yaml --synthetic
+  --config configs/pretrain_visual_tiny.yaml \
+  --synthetic
 ```
 
-Resume by passing `--resume /path/to/checkpoint.pt`. The checkpoint restores the
-online encoder, EMA encoder, predictor, optimizer, scheduler, AMP scaler, each
-rank's RNG state, optimizer step, data manifest hash, and W&B run ID.
+The tiny configuration is only for tests and local smoke checks. Its output is
+not a valid M1 checkpoint.
 
-Export the EMA encoder after M1:
+## Data pipeline
+
+MCWM stores each recording as a canonical episode while leaving the original
+MP4 in place:
+
+```text
+<dataset-root>/
+├── dataset_manifest.json
+└── episodes/
+    └── <episode-id>/
+        ├── manifest.json
+        ├── actions.jsonl
+        ├── frame_timestamps.json
+        └── audit.json            # present when the adapter emits QA metadata
+```
+
+Every action block is assigned to the half-open interval between two frames:
+
+```text
+frame[t] -- actions in [pts[t], pts[t+1]) --> frame[t+1]
+```
+
+The data contract requires exactly `640x360` RGB video. A canonical manifest
+references the source MP4 instead of copying it, so do not move or delete the
+video after ingestion. Formal training validates the complete manifest and
+refuses to start if it contains a non-VPT episode.
+
+### Ingest one recording
+
+VPT contractor data:
+
+```bash
+PYTHONPATH=src python3 scripts/prepare_vpt.py \
+  --output /path/to/canonical \
+  --video /path/to/episode.mp4 \
+  --actions /path/to/episode.jsonl \
+  --episode-id episode-001 \
+  --session-id session-001 \
+  --world-id world-001 \
+  --recorder-version 7.x \
+  --split train
+```
+
+The command extracts exact frame PTS with PyAV. Pass
+`--frame-timestamps timestamps.json` only when timestamps have already been
+extracted separately.
+
+Audit the resulting store and write a machine-readable report:
+
+```bash
+PYTHONPATH=src python3 scripts/audit_data.py /path/to/canonical \
+  --output /path/to/canonical/audit-report.json
+```
+
+The audit exits with a non-zero status when session/world leakage is found.
+Inspect all reported timing or discontinuity issues before training. For a
+visual alignment check, render an episode with its actions overlaid:
+
+```bash
+PYTHONPATH=src python3 scripts/render_action_overlay.py \
+  /path/to/canonical episode-001 /tmp/episode-001-overlay.mp4
+```
+
+See [DATA_PREPARATION.md](DATA_PREPARATION.md) for the reproducible VPT subset
+download, conversion, audit, and single-H200 workflow.
+
+## Visual pretraining
+
+The M1 objective uses an online encoder for masked context, an EMA target
+encoder for the complete clip, and a predictor for the masked tubelet tokens:
+
+```text
+masked clip ──> online encoder ──> visual predictor ──> predicted latents
+full clip   ──> EMA encoder ─────────────────────────> target latents
+```
+
+Only the online branch and predictor receive gradients. The target branch is
+stop-gradient and updated from the online encoder with EMA. All model weights
+start inside MCWM; checkpoints explicitly record `external_pretrained=false`.
+
+### Training configurations
+
+| Configuration | Intended use |
+| --- | --- |
+| `configs/pretrain_visual_tiny.yaml` | CPU smoke test only |
+| `configs/pretrain_visual.yaml` | Generic formal CUDA run |
+| `configs/pretrain_visual_1xh200.yaml` | One H200 |
+| `configs/pretrain_visual_2xh100.yaml` | Two H100 GPUs with FSDP |
+| `configs/pretrain_visual_4xh100_sxm.yaml` | Four H100 SXM GPUs with FSDP |
+
+Start a single-process run:
+
+```bash
+wandb login
+PYTHONPATH=src python3 -m mcwm.training.pretrain_visual \
+  --config configs/pretrain_visual_1xh200.yaml \
+  --data-root /path/to/canonical \
+  --output-dir /path/to/checkpoints/m1-visual
+```
+
+Start the two-H100 configuration:
+
+```bash
+wandb login
+PYTHONPATH=src torchrun --standalone --nproc-per-node=2 \
+  -m mcwm.training.pretrain_visual \
+  --config configs/pretrain_visual_2xh100.yaml \
+  --data-root /path/to/canonical \
+  --output-dir /path/to/checkpoints/m1-visual-2xh100
+```
+
+Use `--wandb-mode offline` on a host without network access, or
+`--wandb-mode disabled` for local checks. Training metrics are also written to
+local JSONL logs.
+
+### Resume a run
+
+```bash
+PYTHONPATH=src python3 -m mcwm.training.pretrain_visual \
+  --config configs/pretrain_visual_1xh200.yaml \
+  --data-root /path/to/canonical \
+  --output-dir /path/to/checkpoints/m1-visual \
+  --resume /path/to/checkpoint-00001800.pt
+```
+
+A checkpoint restores the online and EMA encoders, predictor, optimizer,
+scheduler, AMP scaler, per-rank RNG state, optimizer step, W&B run identity,
+and sampler progress. Resume validates the dataset manifest hash and critical
+training semantics before loading weights.
+
+### Export and evaluate the encoder
+
+Export only the EMA visual encoder to SafeTensors:
 
 ```bash
 PYTHONPATH=src python3 scripts/export_visual_encoder.py \
-  /path/to/checkpoint.pt /path/to/mcwm-visual-ema.safetensors
+  /path/to/checkpoint.pt \
+  /path/to/mcwm-visual-ema.safetensors
 ```
 
-Compare its frozen linear probes with a random encoder:
+Compare frozen linear probes from the trained encoder with a random encoder:
 
 ```bash
 PYTHONPATH=src python3 scripts/evaluate_visual_probe.py \
-  /path/to/checkpoint.pt /path/to/canonical-dataset \
-  --output /path/to/probe-report.json --log-wandb
+  /path/to/checkpoint.pt \
+  /path/to/canonical \
+  --output /path/to/probe-report.json \
+  --log-wandb
 ```
 
-Training artifacts and datasets remain outside the repository by default.
-The repository does not include or claim a fully trained M1 checkpoint; that
-artifact is produced on the CUDA training host from the configured VPT/MineRL
-1.0 dataset.
+## Repository layout
 
+```text
+src/mcwm/
+├── actions/       # canonical action schema and source adapters
+├── data/          # ingestion, manifests, alignment, datasets, and audits
+├── diagnostics/   # collapse metrics, probes, and visualizations
+├── models/        # Video ViT, masking, and visual JEPA components
+└── training/      # configuration, EMA, checkpointing, logging, and training
 
-See [design.md](design.md) for the full architecture and milestone plan.
+configs/           # data and experiment YAML files
+scripts/           # command-line workflows
+tests/             # unittest suites mirroring the package layout
+design.md          # architecture decisions and future milestones
+```
+
+Datasets, checkpoints, W&B credentials, and generated artifacts must remain
+outside version control. The repository ignores `data/` and `artifacts/` by
+default.
+
+## Design constraints
+
+- VPT contractor demonstrations are the only supported training dataset;
+  MineRL/BASALT demonstrations and unlabeled VPT videos are out of scope.
+- Minecraft 1.16.5 is the target game version. MineRL may be used later as an
+  online evaluation environment, never as a source of training trajectories.
+- Training resolution is fixed at `640x360`; ingestion rejects incompatible
+  manifests instead of silently resizing them.
+- Dataset splits must be grouped by session/world, never by individual clip.
+- Real no-op ticks are training data and must not be discarded.
+- External pretrained weights, including VPT policy/IDM weights and generic
+  visual checkpoints, are not accepted by the training pipeline.
+
+For the full model rationale, future action-conditioned architecture, tests,
+and milestone acceptance criteria, read [design.md](design.md).

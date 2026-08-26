@@ -3,10 +3,10 @@
 ## 0. 文档状态
 
 - 状态：首版实现计划（Benchmark 暂不在范围内）
-- 目标环境：Minecraft 1.16.5，对齐 VPT / MineRL 1.0
-- 数据来源：VPT contractor demonstrations 与 MineRL 1.0 / BASALT demonstrations
+- 目标环境：Minecraft 1.16.5；训练数据对齐 VPT contractor 格式，未来在线评估可接 MineRL 1.0 environment
+- 数据来源：仅使用带动作标签的 VPT contractor demonstrations
 - 训练原则：所有模型均由本项目从随机初始化开始训练
-- 明确排除：Malmo、MineRL-v0、旧版 Treechop 数据、任何外部预训练权重
+- 明确排除：MineRL/BASALT demonstrations、VPT 无标签网络视频、Malmo、MineRL-v0、旧版 Treechop 数据、任何外部预训练权重
 
 本文设计基于 [LeWorldModel](https://arxiv.org/html/2603.19312v1) 的 latent world model 思路，但按需求采用带 EMA target encoder 和 stop-gradient 的两阶段训练，而不是照搬论文中完全端到端、无 EMA/stop-gradient 的训练方式。
 
@@ -16,7 +16,7 @@
 
 首期完成标准如下：
 
-1. 能把 VPT 和 MineRL 1.0 数据转换为同一个、时序严格对齐的数据格式。
+1. 能把 VPT contractor demonstrations 转换为时序严格对齐的 canonical 数据格式。
 2. 从零训练一个 Minecraft 视觉 encoder，不加载任何外部视觉权重。
 3. 从零训练 action encoder 和 action-conditioned predictor。
 4. 训练过程不发生 latent collapse，并能通过量化指标检测 collapse。
@@ -45,7 +45,7 @@
 
 **阶段 A：Minecraft 视觉预训练**
 
-在 VPT/MineRL 1.0 视频上训练 masked video JEPA。online encoder 只看到被 mask 的时空 context，predictor 预测完整视频中被 mask 区域的 target latent。target encoder 不参与反向传播，通过 online encoder 的 EMA 更新：
+在 VPT contractor demonstration 视频上训练 masked video JEPA。online encoder 只看到被 mask 的时空 context，predictor 预测完整视频中被 mask 区域的 target latent。target encoder 不参与反向传播，通过 online encoder 的 EMA 更新：
 
 ```text
 θ̄ ← τθ̄ + (1 − τ)θ
@@ -111,7 +111,7 @@ SIGReg 将 online latent 在多个随机方向上的一维投影约束为标准�
 - 可选 diagnostic decoder
 - planner 使用的 macro-action codebook
 
-VPT 仓库只允许用于理解数据格式、动作语义和 MineRL 1.0 环境接口。代码可以重新实现兼容逻辑，但不得自动下载或加载 VPT `.weights` / `.model` 文件。
+VPT 仓库只允许用于理解 contractor 数据格式和动作语义。代码可以重新实现兼容逻辑，但不得自动下载或加载 VPT `.weights` / `.model` 文件。
 
 每个 checkpoint 保存以下 provenance：
 
@@ -132,11 +132,11 @@ VPT 仓库只允许用于理解数据格式、动作语义和 MineRL 1.0 环境�
 | 数据 | 用途 | 是否首期使用 | 备注 |
 |---|---|---:|---|
 | VPT contractor demonstrations | 视觉预训练、动作条件训练 | 是 | MP4 + 每帧 JSONL 动作；Minecraft 1.16.5 |
-| MineRL 1.0 / BASALT demonstrations | 补充场景与行为多样性 | 是 | 使用接近真人的键鼠动作空间 |
-| MineRL 1.0 environment | 在线 smoke test / 未来规划 | 是 | 只使用环境，不使用模型权重 |
-| VPT 无标签网络视频 | 后续扩展 | 否 | 若使用，必须由我们自己训练的 IDM 生成伪标签 |
+| MineRL 1.0 / BASALT demonstrations | 不使用 | 否 | 不进入下载、预处理、训练或评估数据集 |
+| VPT 无标签网络视频 | 不使用 | 否 | 不训练或使用 IDM 生成伪标签 |
+| MineRL 1.0 environment | 在线 smoke test / 未来规划 | 是 | 仅作为交互环境，不保留其 trajectory 作为训练数据 |
 
-VPT contractor 数据本身已有键鼠动作 JSONL，因此首期不需要 VPT 官方 IDM。未来若要加入大规模无标签视频，将先使用有标签 contractor/MineRL 数据从零训练自己的 IDM，再生成带置信度的伪标签；伪标签数据和人工记录动作必须分开采样与统计。
+训练语料固定为 VPT contractor demonstrations。它们已经带有键鼠动作 JSONL，因此不需要 VPT 官方 IDM，也不为无标签视频生成伪标签。训练入口必须拒绝包含任何非 VPT episode 的 manifest；数据 manifest 和 checkpoint provenance 必须能证明所有训练 episode 都来自 contractor 集合。
 
 ### 4.2 Canonical action schema
 
@@ -154,7 +154,7 @@ CanonicalActionTick
   gui_open: bool
   valid: bool
   timestamp_ms: int64
-  source: enum[vpt, minerl]
+  source: enum[vpt]
   label_confidence: float32     # 人工记录动作固定为 1.0
 ```
 
@@ -210,7 +210,7 @@ o_0 --A_0--> o_1 --A_1--> ... --A_(T-1)--> o_T
 
 - 解码后统一为 RGB `uint8`。
 - 模型输入固定为 `640x360`，即 tensor shape 为 `(C=3, H=360, W=640)`。
-- VPT contractor 的 360p 数据和 MineRL 1.0 `pov` 均保持原始 `640x360`，不做常规空间 resize、crop 或 square distortion。
+- VPT contractor 的 360p 数据保持原始 `640x360`，不做常规空间 resize、crop 或 square distortion。
 - 若文件不满足 `640x360`，预处理直接标为异常；只有在来源明确且配置了版本化转换规则时才允许转为 `640x360`，不能静默缩放。
 - 不做会改变动作语义的水平翻转。
 - 亮度、gamma、轻微颜色扰动只用于阶段 A 视觉预训练，阶段 B 默认关闭强增强。
@@ -397,7 +397,7 @@ L = L_pred + λL_SIGReg + βL_IDM
 
 ### 6.1 阶段 A：视觉预训练
 
-输入使用 VPT + MineRL 1.0 的全部有效视频片段，不要求动作标签。按来源和 recorder/task 做平衡采样，避免最长的一类普通游玩视频完全主导训练。
+输入只使用 VPT contractor demonstrations 的有效视频片段。阶段 A 不读取动作作为模型输入，但每个视频仍必须来自带标签的 contractor 集合。按 contractor、recorder version 和 session 做分桶验证，避免少数长录像完全主导训练。
 
 初始默认值：
 
@@ -495,7 +495,7 @@ L_pred = Σ_h∈{1,2,4,8} w_h ‖ẑ(t+h) − z_target(t+h)‖₂²
 - total loss 与各项 loss，例如 visual prediction loss、world-model prediction loss 和 SIGReg。
 - learning rate、EMA momentum、gradient norm、parameter norm 和 AMP loss scale。
 - samples/second、tokens/second、data loading time、step time、显存使用量和累计训练时长。
-- 每组 mask ratio、跨帧一致性统计，以及各数据来源在当前 batch 中的占比。
+- 每组 mask ratio、跨帧一致性统计，以及各 contractor/recorder 分桶在当前 batch 中的占比。
 - latent mean/std、effective rank、pairwise cosine、covariance off-diagonal norm 和 online/EMA cosine gap。
 
 每次 validation 记录 validation loss、collapse diagnostics、linear probe、action sensitivity 和多步 rollout 指标中当前阶段适用的部分。可视化采用固定 validation sample ID，以便跨 run 比较：
@@ -503,7 +503,7 @@ L_pred = Σ_h∈{1,2,4,8} w_h ‖ẑ(t+h) − z_target(t+h)‖₂²
 - 阶段 A：原始 clip、mask 图和按 token 聚合的 prediction-error heatmap。
 - 阶段 B：真实/shuffled/no-op 动作误差对比、rollout error 曲线和 surprise 曲线。
 
-W&B artifact 只保存小型可追溯产物：resolved config、数据 audit 报告、评估汇总和版本化 checkpoint。原始 VPT/MineRL 视频、完整 action 文件和包含隐私信息的本地路径不得上传。大型 checkpoint 是否上传由 `wandb.log_checkpoints` 控制；无论是否上传，checkpoint 都先原子写入本地目录。
+W&B artifact 只保存小型可追溯产物：resolved config、数据 audit 报告、评估汇总和版本化 checkpoint。原始 VPT contractor 视频、完整 action 文件和包含隐私信息的本地路径不得上传。大型 checkpoint 是否上传由 `wandb.log_checkpoints` 控制；无论是否上传，checkpoint 都先原子写入本地目录。
 
 断点恢复规则：
 
@@ -522,7 +522,7 @@ wandb:
   project: mcwm
   group: m1-visual
   name: null               # 默认由 milestone、时间和短 git SHA 生成
-  tags: [vpt, minerl1, from-scratch]
+  tags: [vpt, contractor, from-scratch]
   log_every_steps: 10
   diagnostics_every_steps: 200
   validation_every_steps: 1000
@@ -640,9 +640,7 @@ MCWM/
 ├── pyproject.toml
 ├── configs/
 │   ├── data/
-│   │   ├── vpt.yaml
-│   │   ├── minerl1.yaml
-│   │   └── mixed.yaml
+│   │   └── vpt.yaml
 │   ├── pretrain_visual.yaml
 │   ├── train_world_model.yaml
 │   └── plan.yaml
@@ -650,7 +648,6 @@ MCWM/
 │   ├── actions/
 │   │   ├── schema.py
 │   │   ├── vpt_adapter.py
-│   │   ├── minerl_adapter.py
 │   │   └── codec.py
 │   ├── data/
 │   │   ├── manifest.py
@@ -685,7 +682,6 @@ MCWM/
 │       └── surprise.py
 ├── scripts/
 │   ├── prepare_vpt.py
-│   ├── prepare_minerl1.py
 │   ├── build_shards.py
 │   ├── audit_data.py
 │   ├── pretrain_visual.py
@@ -707,7 +703,6 @@ MCWM/
 ### 10.1 数据测试
 
 - VPT JSONL 到 CanonicalAction 的逐字段 fixture。
-- MineRL 1.0 action dict 到 CanonicalAction 的逐字段 fixture。
 - frame/action off-by-one 测试。
 - 时间断点不会跨越采样测试。
 - no-op 被保留、padding 与 no-op 可区分。
@@ -739,7 +734,7 @@ MCWM/
 ### M0：工程与数据契约
 
 - 初始化 Python package、配置和测试框架。
-- 实现 CanonicalAction 和两个数据 adapter。
+- 实现 CanonicalAction 和 VPT contractor 数据 adapter。
 - 实现 manifest、对齐、episode store 和数据 audit。
 - 产出小规模可复现 fixture dataset。
 
@@ -751,7 +746,7 @@ MCWM/
 - 实现 masked spatiotemporal sampling 和 visual predictor。
 - 完成小数据 overfit、collapse diagnostics 和 checkpoint resume。
 - 接入 W&B，记录 loss、EMA、吞吐、显存、collapse diagnostics 和固定样本可视化。
-- 在混合 VPT/MineRL 1.0 视频上训练首个 visual checkpoint。
+- 仅在 VPT contractor demonstration 视频上训练首个 visual checkpoint。
 
 完成条件：无 collapse，validation loss 与 probe 指标优于随机 encoder；W&B run 可从 checkpoint 无缝恢复且 provenance 完整。
 
@@ -783,20 +778,20 @@ MCWM/
 
 | 风险 | 表现 | 应对 |
 |---|---|---|
-| VPT/MineRL 数据对齐错误 | 模型看似不使用动作 | PTS 对齐、overlay 抽检、off-by-one fixture |
+| VPT 数据对齐错误 | 模型看似不使用动作 | PTS 对齐、overlay 抽检、off-by-one fixture |
 | no-op 被删除 | 惯性和被动动态学错 | 保留真实 no-op，只过滤损坏 transition |
 | 动作空间过度简化 | 无法学习 use/hotbar/GUI | 完整 canonical schema + micro-action encoder |
 | latent collapse | std/rank 降低 | EMA target + stop-grad + SIGReg + 硬报警 |
 | predictor 忽略动作 | shuffled action 误差不变 | action sensitivity gate，必要时自训练 IDM head |
 | 长 rollout 漂移 | horizon 增大误差爆炸 | 逐步多步训练、短 horizon MPC、频繁 replan |
 | 第一人称部分可观测 | 相同画面对应不同世界状态 | 16-step context；后续引入 memory/hierarchy |
-| 数据来源偏差 | latent 按 recorder/source 聚类 | source-balanced sampler 和分桶验证 |
+| 数据来源偏差 | latent 按 contractor/recorder 聚类 | contractor/recorder 分桶验证 |
 | GUI 与世界控制混杂 | 非法规划动作 | GUI mode 显式编码、macro-action 合法性 mask |
 | 训练规模超预算 | 约 762M 推理模型、640×360 长 clip 成本过高 | 2-frame tubelet、20×20 patch、visible-token encoder、bf16、Flash Attention、activation checkpointing、FSDP/ZeRO、sharded cache |
 
 ## 13. 实现时必须保持的原则
 
-1. VPT/MineRL 1.0 是唯一数据和环境标准。
+1. 训练数据只允许 VPT contractor demonstrations；MineRL 仅可作为未来在线评估环境，环境 trajectory 不得回流训练集。
 2. 所有可学习模块全部由 MCWM 自己训练。
 3. 默认同时使用 EMA target encoder 与 stop-gradient。
 4. action-conditioned predictor 必须随机初始化训练，不能复用 VPT policy 表征。

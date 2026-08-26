@@ -12,7 +12,6 @@ data:
   clips_per_video: 1
   batch_size: 2
   workers: 0
-  source_balanced: false
 model:
   image_height: 40
   image_width: 40

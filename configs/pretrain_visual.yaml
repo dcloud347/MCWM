@@ -4,7 +4,7 @@ device: cuda
 precision: bf16
 output_dir: artifacts/m1-visual-base
 data:
-  # 指向 M0 prepare_vpt/prepare_minerl1 生成的 canonical dataset。
+  # 指向 M0 prepare_vpt 生成的 VPT contractor canonical dataset。
   root: data/canonical
   train_split: train
   validation_split: validation
@@ -15,8 +15,6 @@ data:
   # 每张 GPU 一次处理 16 个 clip；梯度累积次数由实际 GPU 数自动计算。
   batch_size: 16
   workers: 8
-  # 按数据源反频率有放回抽取 batch 中的视频。
-  source_balanced: true
 model:
   # 固定 640×360 和 20×20 patch；2-frame tubelet 得到 8×18×32=4608 tokens。
   image_height: 360
@@ -91,7 +89,7 @@ wandb:
   project: mcwm
   group: m1-visual
   name: null
-  tags: [vpt, minerl1, from-scratch, m1]
+  tags: [vpt, contractor, from-scratch, m1]
   log_every_steps: 10
   diagnostics_every_steps: 200
   log_checkpoints: false

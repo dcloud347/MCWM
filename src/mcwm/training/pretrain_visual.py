@@ -23,9 +23,7 @@ from mcwm.data.manifest import DatasetManifest
 from mcwm.data.visual_dataset import (
     CanonicalVisualDataset,
     DistributedResumableSampler,
-    DistributedSourceBalancedSampler,
     ResumableSampler,
-    source_balanced_weights,
 )
 from mcwm.diagnostics.collapse import (
     CollapseThresholds,
@@ -77,7 +75,6 @@ class SyntheticVideoDataset(Dataset):
         return {
             "frames": torch.stack(clip),
             "sample_id": f"synthetic:{index}",
-            "source": "synthetic",
         }
 
 
@@ -610,6 +607,19 @@ def _make_loaders(
     else:
         root = Path(data["root"])
         dataset_manifest = DatasetManifest.read(root / "dataset_manifest.json")
+        unexpected = [
+            episode.episode_id
+            for episode in dataset_manifest.episodes
+            if episode.source.value != "vpt"
+        ]
+        if unexpected:
+            preview = ", ".join(unexpected[:5])
+            if len(unexpected) > 5:
+                preview += f", ... ({len(unexpected)} total)"
+            raise ValueError(
+                "canonical dataset contains non-VPT episodes; MCWM training accepts only "
+                f"VPT contractor demonstrations: {preview}"
+            )
         manifest_hash = dataset_manifest.content_hash
         train_dataset = CanonicalVisualDataset(
             root,
@@ -631,30 +641,15 @@ def _make_loaders(
     validation_sampler = None
     shuffle = True
     if world_size > 1:
-        if data.get("source_balanced", False) and isinstance(
-            train_dataset, CanonicalVisualDataset
-        ):
-            train_sampler = DistributedSourceBalancedSampler(
-                train_dataset, rank=rank, world_size=world_size, seed=seed
-            )
-        else:
-            train_sampler = DistributedResumableSampler(
-                len(train_dataset),
-                rank=rank,
-                world_size=world_size,
-                seed=seed,
-                seed_clips=isinstance(train_dataset, CanonicalVisualDataset),
-            )
+        train_sampler = DistributedResumableSampler(
+            len(train_dataset),
+            rank=rank,
+            world_size=world_size,
+            seed=seed,
+            seed_clips=isinstance(train_dataset, CanonicalVisualDataset),
+        )
         validation_sampler = torch.utils.data.distributed.DistributedSampler(
             validation_dataset, num_replicas=world_size, rank=rank, shuffle=False
-        )
-        shuffle = False
-    elif data.get("source_balanced", False) and isinstance(train_dataset, CanonicalVisualDataset):
-        train_sampler = ResumableSampler(
-            len(train_dataset),
-            seed=seed,
-            weights=source_balanced_weights(train_dataset),
-            seed_clips=True,
         )
         shuffle = False
     else:
@@ -978,12 +973,6 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                     ).item()
                 if use_scaler:
                     metrics["train/amp_loss_scale"] = float(scaler.get_scale())
-                sources = list(batch.get("source", []))
-                if sources:
-                    for source in ("vpt", "minerl", "synthetic"):
-                        metrics[f"data/source_{source}_fraction"] = _distributed_mean(
-                            sources.count(source) / len(sources), device
-                        )
                 if device.type == "cuda":
                     metrics["system/max_memory_gib"] = torch.cuda.max_memory_allocated(device) / 2**30
                     metrics["system/max_reserved_memory_gib"] = (
