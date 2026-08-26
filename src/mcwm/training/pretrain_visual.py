@@ -531,7 +531,7 @@ def validate(
         if batch_index == 0:
             visuals = visual_pretraining_images(
                 frames,
-                output["target_mask"],
+                output["prediction_mask"],
                 output["prediction"],
                 output["target"],
                 prediction_indices=output["prediction_indices"],
@@ -943,8 +943,8 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                         * _unwrapped(model).config.encoder.token_count
                         / max(elapsed, 1e-9)
                     ),
-                    "mask/ratio": output["target_mask"].float().mean().item(),
-                    "mask/per_tubelet_ratio_std": output["target_mask"]
+                    "mask/ratio": output["prediction_mask"].float().mean().item(),
+                    "mask/per_tubelet_ratio_std": output["prediction_mask"]
                     .float()
                     .mean(dim=-1)
                     .std(unbiased=False)
@@ -955,18 +955,18 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                         fsdp_sharded=world_size > 1 and strategy == "fsdp",
                     ),
                 }
-                for group_index, group_mask in enumerate(output["target_mask"]):
+                for group_index, group_mask in enumerate(output["prediction_mask"]):
                     metrics[f"mask/group_{group_index}_ratio"] = (
                         group_mask.float().mean().item()
                     )
-                if output["target_mask"].shape[2] > 1:
+                if output["prediction_mask"].shape[2] > 1:
                     adjacent_intersection = (
-                        output["target_mask"][:, :, 1:]
-                        & output["target_mask"][:, :, :-1]
+                        output["prediction_mask"][:, :, 1:]
+                        & output["prediction_mask"][:, :, :-1]
                     ).float().sum()
                     adjacent_union = (
-                        output["target_mask"][:, :, 1:]
-                        | output["target_mask"][:, :, :-1]
+                        output["prediction_mask"][:, :, 1:]
+                        | output["prediction_mask"][:, :, :-1]
                     ).float().sum().clamp_min(1.0)
                     metrics["mask/adjacent_iou"] = (
                         adjacent_intersection / adjacent_union

@@ -122,6 +122,10 @@ class VisualJEPA(nn.Module):
 
         flat_masks = target_mask.flatten(2)
         grouped_indices = tuple(_indices_from_mask(group_mask) for group_mask in flat_masks)
+        prediction_mask = torch.zeros_like(flat_masks)
+        for group_index, (_, prediction_indices) in enumerate(grouped_indices):
+            prediction_mask[group_index].scatter_(1, prediction_indices, True)
+        prediction_mask = prediction_mask.reshape_as(target_mask)
 
         # 完整 clip 的 target 只编码一次；官方训练在 encoder norm 后再做 feature LN。
         with torch.no_grad():
@@ -169,6 +173,7 @@ class VisualJEPA(nn.Module):
             "prediction": tuple(prediction_groups),
             "target": target,
             "target_mask": target_mask,
+            "prediction_mask": prediction_mask,
             "context_indices": tuple(pair[0] for pair in grouped_indices),
             "prediction_indices": tuple(pair[1] for pair in grouped_indices),
         }

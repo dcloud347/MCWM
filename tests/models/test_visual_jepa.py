@@ -59,6 +59,7 @@ class VisualJEPATest(unittest.TestCase):
         output = model(frames, mask_generator=torch.Generator().manual_seed(4))
         self.assertEqual(len(output["prediction"]), 2)
         self.assertEqual(tuple(output["target_mask"].shape), (2, 2, 2, 6))
+        self.assertEqual(tuple(output["prediction_mask"].shape), (2, 2, 2, 6))
         self.assertEqual(tuple(output["target"].shape), (2, 2, 6, 24))
         self.assertTrue(torch.isfinite(output["loss"]))
         per_task_losses = []
@@ -68,6 +69,9 @@ class VisualJEPATest(unittest.TestCase):
             indices = output["prediction_indices"][group_index]
             self.assertFalse(flat_mask.gather(1, context_indices).any())
             self.assertTrue(flat_mask.gather(1, indices).all())
+            effective_mask = output["prediction_mask"][group_index].flatten(1)
+            self.assertEqual(effective_mask.sum().item(), indices.numel())
+            self.assertTrue(effective_mask.gather(1, indices).all())
             targets = output["target"].flatten(1, 2).gather(
                 1,
                 indices.unsqueeze(-1).expand(-1, -1, 24),
