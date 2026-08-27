@@ -15,8 +15,8 @@ class CollapseThresholds:
     """判断特征坍塌时使用的阈值。"""
 
     minimum_average_std: float = 0.35
-    minimum_effective_rank: float = 2.5
-    maximum_pairwise_cosine: float = 0.8
+    minimum_effective_rank: float = 6.0
+    maximum_pairwise_cosine: float = 0.75
 
 
 @torch.no_grad()

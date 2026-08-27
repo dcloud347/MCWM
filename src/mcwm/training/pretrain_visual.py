@@ -415,6 +415,18 @@ def _total_optimizer_steps(optimizer_config: Mapping[str, Any]) -> int:
     return math.ceil(epochs * iterations_per_epoch)
 
 
+def _collapse_checks_active(
+    optimizer_step: int,
+    *,
+    validation_every_steps: int,
+    grace_validations: int,
+) -> bool:
+    """在训练初期的 validation 观察期结束后启用坍塌报警。"""
+
+    completed_validations = optimizer_step // validation_every_steps
+    return completed_validations > grace_validations
+
+
 def _infinite_batches(
     loader: DataLoader,
     *,
@@ -1017,6 +1029,15 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                     progress_label=f"validation step {optimizer_step}",
                 )
                 collapse_config = config["collapse"]
+                collapse_check_active = bool(
+                    config["validation"].get("collapse_check", True)
+                ) and _collapse_checks_active(
+                    optimizer_step,
+                    validation_every_steps=int(config["validation"]["every_steps"]),
+                    grace_validations=int(
+                        collapse_config.get("grace_validations", 0)
+                    ),
+                )
                 alerts = (
                     find_collapse_alerts(
                         metrics,
@@ -1033,10 +1054,13 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                         ),
                         prefix="validation/latent",
                     )
-                    if config["validation"].get("collapse_check", True)
+                    if collapse_check_active
                     else ()
                 )
                 collapse_bad_validations = collapse_bad_validations + 1 if alerts else 0
+                metrics["validation/collapse_check_active"] = float(
+                    collapse_check_active
+                )
                 metrics["validation/collapse_bad_validations"] = collapse_bad_validations
                 logger.log(metrics, step=optimizer_step)
                 if visuals is not None:

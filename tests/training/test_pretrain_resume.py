@@ -8,13 +8,34 @@ try:
     import yaml  # noqa: F401
     from mcwm.training.checkpoint import read_checkpoint
     from mcwm.training.config import load_yaml_config
-    from mcwm.training.pretrain_visual import _total_optimizer_steps, train
+    from mcwm.training.pretrain_visual import (
+        _collapse_checks_active,
+        _total_optimizer_steps,
+        train,
+    )
 except ModuleNotFoundError:
     torch = None
 
 
 @unittest.skipIf(torch is None, "PyTorch/PyYAML is not installed")
 class PretrainResumeTest(unittest.TestCase):
+    def test_collapse_checks_start_after_grace_validations(self):
+        for optimizer_step in (1200, 2400, 3600):
+            self.assertFalse(
+                _collapse_checks_active(
+                    optimizer_step,
+                    validation_every_steps=1200,
+                    grace_validations=3,
+                )
+            )
+        self.assertTrue(
+            _collapse_checks_active(
+                4800,
+                validation_every_steps=1200,
+                grace_validations=3,
+            )
+        )
+
     def test_fractional_epochs_resolve_to_optimizer_steps(self):
         self.assertEqual(
             _total_optimizer_steps(

@@ -135,6 +135,11 @@ def validate_pretrain_config(config: Mapping[str, Any]) -> None:
         )
     if int(config["validation"].get("clips_per_video", 1)) <= 0:
         raise ValueError("validation.clips_per_video must be positive")
+    collapse = config["collapse"]
+    if int(collapse.get("grace_validations", 0)) < 0:
+        raise ValueError("collapse.grace_validations must be non-negative")
+    if int(collapse.get("patience_validations", 3)) <= 0:
+        raise ValueError("collapse.patience_validations must be positive")
 
 
 def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:

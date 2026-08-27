@@ -69,9 +69,11 @@ validation:
   batches: 32
   collapse_check: true
 collapse:
+  # 前三次 validation 只观察暂态指标，不报警或累计坍塌次数。
+  grace_validations: 3
   minimum_average_std: 0.35
-  minimum_effective_rank: 2.5
-  maximum_pairwise_cosine: 0.8
+  minimum_effective_rank: 6.0
+  maximum_pairwise_cosine: 0.75
   patience_validations: 3
 checkpoint:
   # 每 1,200 step 保存一次，只保留最近 3 份常规 checkpoint。
