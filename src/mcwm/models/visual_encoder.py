@@ -15,7 +15,12 @@ from .layers import TransformerBlock
 
 @dataclass(frozen=True)
 class VisualEncoderConfig:
-    """Video ViT 的输入大小和网络结构配置。"""
+    """Video ViT 的输入大小和网络结构配置。
+
+    ``clip_frames`` 是 encoder 支持的最大帧数，也是视觉预训练使用的
+    clip 长度。运行时可以输入不超过该值的更短 clip，但帧数必须
+    能被 ``tubelet_size`` 整除。
+    """
 
     image_height: int = 360
     image_width: int = 640
@@ -78,6 +83,28 @@ class VisualEncoderConfig:
 
         return math.prod(self.token_grid_size)
 
+    def runtime_token_grid_size(self, frame_count: int) -> Tuple[int, int, int]:
+        """返回一个合法运行时 clip 的实际 token 网格。"""
+
+        frames = int(frame_count)
+        if frames < self.tubelet_size:
+            raise ValueError(
+                f"clip must contain at least {self.tubelet_size} frames"
+            )
+        if frames > self.clip_frames:
+            raise ValueError(
+                f"clip cannot exceed configured maximum of {self.clip_frames} frames"
+            )
+        if frames % self.tubelet_size:
+            raise ValueError("runtime frame count must be divisible by tubelet_size")
+        rows, columns = self.grid_size
+        return frames // self.tubelet_size, rows, columns
+
+    def runtime_token_count(self, frame_count: int) -> int:
+        """返回一个合法运行时 clip 的实际 token 数。"""
+
+        return math.prod(self.runtime_token_grid_size(frame_count))
+
 
 class VisualEncoder(nn.Module):
     """切分不重叠的时空 patch，并用注意力层编码。"""
@@ -126,17 +153,17 @@ class VisualEncoder(nn.Module):
     def _tokenize(self, clips: Tensor) -> Tensor:
         if clips.ndim != 5:
             raise ValueError("clips must have shape [B, T, 3, H, W]")
-        expected = (
-            self.config.clip_frames,
-            3,
-            self.config.image_height,
-            self.config.image_width,
-        )
-        if tuple(clips.shape[1:]) != expected:
+        frame_count, channels, height, width = clips.shape[1:]
+        if (
+            channels != 3
+            or height != self.config.image_height
+            or width != self.config.image_width
+        ):
             raise ValueError(
-                "clips must have shape "
-                f"[B, {expected[0]}, {expected[1]}, {expected[2]}, {expected[3]}]"
+                "clips must have shape [B, T, 3, "
+                f"{self.config.image_height}, {self.config.image_width}]"
             )
+        self.config.runtime_token_grid_size(frame_count)
         # Conv3d 输入顺序是 [batch, 通道, 时间, 高, 宽]。
         # 输出按时间、行、列的顺序展平，必须与 mask 的 token 编号保持一致。
         return self.patch_embedding(clips.permute(0, 2, 1, 3, 4)).flatten(2).transpose(1, 2)
@@ -150,15 +177,21 @@ class VisualEncoder(nn.Module):
 
         tokens = self._tokenize(clips)
         batch = tokens.shape[0]
+        runtime_token_count = tokens.shape[1]
         if token_indices is None:
             position_ids = torch.arange(
-                self.config.token_count,
+                runtime_token_count,
                 device=tokens.device,
             ).expand(batch, -1)
         else:
             if token_indices.ndim != 2 or token_indices.shape[0] != batch:
                 raise ValueError("token_indices must have shape [B, K]")
             position_ids = token_indices.to(device=tokens.device, dtype=torch.long)
+            if position_ids.numel() and (
+                position_ids.min().item() < 0
+                or position_ids.max().item() >= runtime_token_count
+            ):
+                raise ValueError("token_indices contain positions outside the runtime clip")
             tokens = tokens.gather(
                 1,
                 position_ids.unsqueeze(-1).expand(-1, -1, self.config.dim),
