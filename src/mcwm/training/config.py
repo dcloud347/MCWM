@@ -142,13 +142,12 @@ def validate_pretrain_config(config: Mapping[str, Any]) -> None:
         raise ValueError("collapse.patience_validations must be positive")
 
 
-def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:
-    """只根据配置创建新的 M1 模型，不加载外部权重。"""
+def visual_encoder_config(config: Mapping[str, Any]) -> VisualEncoderConfig:
+    """从 resolved M1 配置中重建 visual encoder 结构。"""
 
-    validate_pretrain_config(config)
     model = config["model"]
     data = config["data"]
-    encoder = VisualEncoderConfig(
+    return VisualEncoderConfig(
         image_height=int(model["image_height"]),
         image_width=int(model["image_width"]),
         patch_size=int(model["patch_size"]),
@@ -161,6 +160,14 @@ def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:
         use_rope=bool(model.get("use_rope", True)),
         gradient_checkpointing=bool(model.get("gradient_checkpointing", True)),
     )
+
+
+def build_visual_jepa(config: Mapping[str, Any]) -> VisualJEPA:
+    """只根据配置创建新的 M1 模型，不加载外部权重。"""
+
+    validate_pretrain_config(config)
+    model = config["model"]
+    encoder = visual_encoder_config(config)
     predictor = VisualPredictorConfig(
         input_dim=encoder.dim,
         dim=int(model["predictor_dim"]),

@@ -11,6 +11,9 @@ import numpy as np
 import torch
 from torch import nn
 
+from mcwm.models.frozen_visual_encoder import FrozenVisualEncoder
+from .config import visual_encoder_config
+
 
 @dataclass(frozen=True)
 class CheckpointProvenance:
@@ -99,10 +102,16 @@ def read_checkpoint(
     path: Path,
     *,
     expected_manifest_hash: Optional[str] = None,
+    memory_map: bool = False,
 ) -> Dict[str, Any]:
     """读取 checkpoint，并先检查格式版本和权重来源。"""
 
-    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+    payload = torch.load(
+        Path(path),
+        map_location="cpu",
+        weights_only=False,
+        mmap=memory_map,
+    )
     if payload.get("format_version") != 1:
         raise ValueError("unsupported checkpoint format")
     provenance = payload.get("provenance")
@@ -188,3 +197,42 @@ def export_ema_encoder(checkpoint_path: Path, destination: Path) -> Path:
         },
     )
     return destination
+
+
+def load_frozen_m1_encoder(
+    checkpoint_path: Path,
+    *,
+    expected_manifest_hash: Optional[str] = None,
+) -> tuple[FrozenVisualEncoder, Dict[str, Any]]:
+    """严格加载 M1 EMA target encoder，供 M2 冻结使用。"""
+
+    payload = read_checkpoint(
+        checkpoint_path,
+        expected_manifest_hash=expected_manifest_hash,
+        memory_map=True,
+    )
+    resolved_config = payload["provenance"]["config"]
+    if not isinstance(resolved_config, Mapping):
+        raise ValueError("M1 checkpoint resolved config must be a mapping")
+    try:
+        encoder_config = visual_encoder_config(resolved_config)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("M1 checkpoint does not contain a valid visual encoder config") from exc
+    if encoder_config.tubelet_size != 2:
+        raise ValueError("V-JEPA 2-AC requires an M1 encoder with tubelet_size=2")
+    if encoder_config.clip_frames != 16:
+        raise ValueError("V-JEPA 2-AC requires an M1 encoder configured for 16 frames")
+
+    prefix = "target_encoder."
+    target_state = {
+        name[len(prefix) :]: value
+        for name, value in payload["model"].items()
+        if name.startswith(prefix)
+    }
+    if not target_state:
+        raise ValueError("M1 checkpoint does not contain target_encoder weights")
+    frozen = FrozenVisualEncoder(encoder_config)
+    frozen.encoder.load_state_dict(target_state, strict=True)
+    frozen.requires_grad_(False)
+    frozen.eval()
+    return frozen, payload
