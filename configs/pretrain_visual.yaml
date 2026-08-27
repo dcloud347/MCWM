@@ -59,7 +59,7 @@ optimizer:
   epochs: 80
   # warmup 保持为 400 step。
   warmup_steps: 400
-  ema_start: 0.999
+  ema_start: 0.996
   ema_end: 0.999
 validation:
   # 每 1,200 step（4 个 epoch）验证一次；连续多次 collapse 才中止。
