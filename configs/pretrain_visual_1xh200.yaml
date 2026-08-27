@@ -31,7 +31,7 @@ model:
   predictor_depth: 12
   predictor_heads: 12
   predictor_mlp_dim: 1536
-  gradient_checkpointing: false
+  gradient_checkpointing: true
 mask:
   # V-JEPA 2 的两套 multi-block mask；每个 block 都贯穿整个 clip。
   - spatial_scale: [0.15, 0.15]

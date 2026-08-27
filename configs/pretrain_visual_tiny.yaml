@@ -26,7 +26,7 @@ model:
   predictor_depth: 2
   predictor_heads: 4
   predictor_mlp_dim: 64
-  gradient_checkpointing: false
+  gradient_checkpointing: true
 mask:
   - spatial_scale: [0.15, 0.15]
     temporal_scale: [1.0, 1.0]

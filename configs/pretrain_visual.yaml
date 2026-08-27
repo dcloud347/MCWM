@@ -30,7 +30,7 @@ model:
   predictor_depth: 12
   predictor_heads: 12
   predictor_mlp_dim: 1536
-  gradient_checkpointing: false
+  gradient_checkpointing: true
 mask:
   # V-JEPA 2：8 个 15% 小块取并集，形成第一套预测 mask。
   - spatial_scale: [0.15, 0.15]
