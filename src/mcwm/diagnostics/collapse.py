@@ -14,9 +14,9 @@ from torch.nn import functional as F
 class CollapseThresholds:
     """判断特征坍塌时使用的阈值。"""
 
-    minimum_average_std: float = 0.01
-    minimum_effective_rank: float = 4.0
-    maximum_pairwise_cosine: float = 0.98
+    minimum_average_std: float = 0.35
+    minimum_effective_rank: float = 2.5
+    maximum_pairwise_cosine: float = 0.8
 
 
 @torch.no_grad()

@@ -56,9 +56,9 @@ validation:
   batches: 1
   collapse_check: false
 collapse:
-  minimum_average_std: 0.01
-  minimum_effective_rank: 4.0
-  maximum_pairwise_cosine: 0.999
+  minimum_average_std: 0.35
+  minimum_effective_rank: 2.5
+  maximum_pairwise_cosine: 0.8
   patience_validations: 3
 checkpoint:
   every_steps: 10
