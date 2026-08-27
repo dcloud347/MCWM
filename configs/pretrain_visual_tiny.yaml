@@ -58,9 +58,9 @@ validation:
 collapse:
   # 前三次 validation 只观察暂态指标，不报警或累计坍塌次数。
   grace_validations: 3
-  minimum_average_std: 0.35
-  minimum_effective_rank: 6.0
-  maximum_pairwise_cosine: 0.75
+  minimum_average_std: 0.4
+  minimum_effective_rank: 8.0
+  maximum_pairwise_cosine: 0.7
   patience_validations: 3
 checkpoint:
   every_steps: 10
