@@ -25,14 +25,14 @@ class WorldModelDistributedTest(unittest.TestCase):
             self.repository / "configs" / "train_world_model_tiny.yaml"
         )
 
-    def test_two_h100_config_uses_one_global_micro_step(self):
+    def test_two_h100_config_uses_two_global_micro_steps(self):
         config = load_yaml_config(
             self.repository / "configs" / "train_world_model_2xh100_sxm.yaml"
         )
         validate_world_model_config(config)
         self.assertEqual(config["distributed"]["strategy"], "fsdp")
-        self.assertEqual(_accumulation_steps(config, world_size=2), 1)
-        self.assertEqual(config["model"]["encoder_frame_chunk_size"], 384)
+        self.assertEqual(_accumulation_steps(config, world_size=2), 2)
+        self.assertEqual(config["model"]["encoder_frame_chunk_size"], 192)
 
     def test_fsdp_strategy_is_valid_but_ddp_is_rejected(self):
         fsdp_config = deepcopy(self.config)

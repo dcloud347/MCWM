@@ -18,7 +18,7 @@ data:
   sample_fps: 4
   samples_per_video: 8
 
-  # 每张 H100 处理 16 条样本，两张卡的 global micro-batch 为 64。
+  # 每张 H100 处理 16 条样本，两张卡的 global micro-batch 为 32。
   batch_size: 16
   # 每个 FSDP 进程各启动 8 个 worker，因此整机最多有 16 个解码 worker。
   workers: 8
@@ -26,7 +26,7 @@ data:
 model:
   # 从真实首帧开始，连续反馈模型自己的预测结果 6 步，约为 1.5 秒。
   auto_steps: 6
-  # 每张卡一次编码本地 batch 的全部 32 x 12 = 384 帧。
+  # 每张卡一次编码本地 batch 的全部 16 x 12 = 192 帧。
   encoder_frame_chunk_size: 192
 
   action_encoder:
@@ -61,7 +61,7 @@ optimizer:
   learning_rate: 0.0001
   weight_decay: 0.05
   gradient_clip: 1.0
-  # 32 samples/GPU x 2 GPUs x 1 micro-step = 64，因此不需要梯度累积。
+  # 16 samples/GPU x 2 GPUs x 2 micro-steps = 64，因此累计 2 个 micro-batches。
   effective_batch_size: 64
   iterations_per_epoch: 300
   epochs: 80
