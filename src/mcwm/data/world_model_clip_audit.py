@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
+import time
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from mcwm.actions.schema import CanonicalActionTick
@@ -21,6 +23,41 @@ CATEGORY_NAMES = (
     "gui_open",
     "cursor",
 )
+
+
+class _ProgressBar:
+    """不依赖第三方包的轻量终端进度条。"""
+
+    def __init__(self, total: int, *, enabled: bool) -> None:
+        self.total = max(0, int(total))
+        self.enabled = enabled
+        self.started_at = time.monotonic()
+        self.last_rendered_at = 0.0
+
+    def update(self, current: int) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if current < self.total and now - self.last_rendered_at < 0.2:
+            return
+        elapsed = max(now - self.started_at, 1e-9)
+        fraction = min(current / self.total, 1.0) if self.total else 1.0
+        filled = round(30 * fraction)
+        bar = "#" * filled + "-" * (30 - filled)
+        rate = current / elapsed
+        print(
+            f"\rScanning clips [{bar}] {fraction:6.2%} "
+            f"{current}/{self.total} {rate:,.1f} clips/s",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        self.last_rendered_at = now
+
+    def close(self, current: int) -> None:
+        if self.enabled:
+            self.update(current)
+            print(file=sys.stderr, flush=True)
 
 
 def _tick_categories(action: CanonicalActionTick) -> Dict[str, bool]:
@@ -44,6 +81,7 @@ def audit_world_model_dataset(
     seed: int,
     sampling_epochs: int = 1,
     max_clips: Optional[int] = None,
+    show_progress: bool = False,
 ) -> Dict[str, Any]:
     """按训练 sampler 的规则统计 clip、transition 和 tick 动作覆盖率。"""
 
@@ -71,6 +109,10 @@ def audit_world_model_dataset(
     )
     stop = False
     completed_epochs = 0
+    total_clips = len(dataset) * sampling_epochs
+    if max_clips is not None:
+        total_clips = min(total_clips, max_clips)
+    progress = _ProgressBar(total_clips, enabled=show_progress)
     for epoch in range(sampling_epochs):
         sampler.set_epoch(epoch)
         for sample_index in sampler:
@@ -101,6 +143,7 @@ def audit_world_model_dataset(
 
             totals["clips"] += 1
             totals["clips_with_action"] += int(clip_has_action)
+            progress.update(totals["clips"])
             for name in clip_category_names:
                 clip_categories[name] += 1
 
@@ -110,6 +153,7 @@ def audit_world_model_dataset(
         completed_epochs += 1
         if stop:
             break
+    progress.close(totals["clips"])
 
     clips = totals["clips"]
     transitions = totals["transitions"]
@@ -161,6 +205,7 @@ def audit_from_config(
     split: Optional[str] = None,
     sampling_epochs: int = 1,
     max_clips: Optional[int] = None,
+    show_progress: bool = False,
 ) -> Dict[str, Any]:
     """构建与 M2 配置一致的数据集并统计动作覆盖率。"""
 
@@ -180,6 +225,7 @@ def audit_from_config(
         seed=int(config.get("seed", 0)),
         sampling_epochs=sampling_epochs,
         max_clips=max_clips,
+        show_progress=show_progress,
     )
     report["root"] = str(resolved_root)
     report["split"] = resolved_split
@@ -244,6 +290,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--split")
     parser.add_argument("--sampling-epochs", type=int, default=1)
     parser.add_argument("--max-clips", type=int)
+    parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--output", type=Path, help="Write the full JSON report")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text")
     args = parser.parse_args(argv)
@@ -258,6 +305,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         split=args.split,
         sampling_epochs=args.sampling_epochs,
         max_clips=args.max_clips,
+        show_progress=not args.no_progress,
     )
     rendered_json = json.dumps(report, indent=2, sort_keys=True)
     if args.output is not None:

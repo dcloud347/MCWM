@@ -1,3 +1,4 @@
+from io import StringIO
 from pathlib import Path
 import tempfile
 import unittest
@@ -105,6 +106,27 @@ class WorldModelClipAuditTest(unittest.TestCase):
 
             self.assertEqual(report["totals"]["clips"], 3)
             self.assertEqual(report["sampling_epochs_completed"], 2)
+
+    def test_progress_bar_reports_scanned_clips(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_episode(root, "active", active=True)
+            EpisodeStore(root).write_dataset_manifest()
+            dataset = WorldModelDataset(
+                root,
+                split="train",
+                frames_per_sample=4,
+                sample_fps=4,
+                seed=5,
+                samples_per_video=2,
+            )
+            output = StringIO()
+
+            with patch("sys.stderr", output):
+                audit_world_model_dataset(dataset, seed=5, show_progress=True)
+
+            self.assertIn("Scanning clips", output.getvalue())
+            self.assertIn("2/2", output.getvalue())
 
 
 if __name__ == "__main__":
