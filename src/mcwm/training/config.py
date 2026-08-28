@@ -7,10 +7,14 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence, Tuple
 
+from mcwm.models.ac_predictor import ACPredictorConfig, ActionConditionedPredictor
+from mcwm.models.action_encoder import ActionEncoderConfig, MinecraftActionEncoder
+from mcwm.models.frozen_visual_encoder import FrozenVisualEncoder
 from mcwm.models.masking import MaskConfig, MaskGeneratorConfig
 from mcwm.models.visual_encoder import VisualEncoderConfig
 from mcwm.models.visual_jepa import VisualJEPA, VisualJEPAConfig
 from mcwm.models.visual_predictor import VisualPredictorConfig
+from mcwm.models.world_model import WorldModel, WorldModelConfig
 
 
 def load_yaml_config(path: Path) -> Dict[str, Any]:
@@ -187,3 +191,112 @@ def resolved_copy(config: Mapping[str, Any]) -> Dict[str, Any]:
     """返回可写入日志和 checkpoint 的独立配置副本。"""
 
     return deepcopy(dict(config))
+
+
+def validate_world_model_config(config: Mapping[str, Any]) -> None:
+    """检查 M2 数据、模型、优化器和 checkpoint 配置。"""
+
+    required = {
+        "data",
+        "model",
+        "optimizer",
+        "validation",
+        "checkpoint",
+        "wandb",
+    }
+    missing = required - config.keys()
+    if missing:
+        raise ValueError(f"config is missing sections: {sorted(missing)}")
+    if config.get("device") not in {"cpu", "cuda"}:
+        raise ValueError("device must be cpu or cuda")
+    if config.get("precision") not in {"fp32", "bf16", "fp16"}:
+        raise ValueError("precision must be fp32, bf16 or fp16")
+
+    data = config["data"]
+    for name in ("frames_per_sample", "sample_fps", "samples_per_video", "batch_size"):
+        if int(data.get(name, 0)) <= 0:
+            raise ValueError(f"data.{name} must be positive")
+    if int(data["frames_per_sample"]) < 3:
+        raise ValueError("data.frames_per_sample must be at least three")
+
+    optimizer = config["optimizer"]
+    for name in ("learning_rate", "iterations_per_epoch", "epochs"):
+        if float(optimizer.get(name, 0)) <= 0:
+            raise ValueError(f"optimizer.{name} must be positive")
+    if int(optimizer.get("effective_batch_size", 0)) <= 0:
+        raise ValueError("optimizer.effective_batch_size must be positive")
+
+    model = config["model"]
+    action_encoder_config(config)
+    predictor = ac_predictor_config(config)
+    auto_steps = int(model.get("auto_steps", 2))
+    if not 1 <= auto_steps < int(data["frames_per_sample"]):
+        raise ValueError("model.auto_steps must be smaller than frames_per_sample")
+    if predictor.context_blocks < int(data["frames_per_sample"]) - 1:
+        raise ValueError("predictor context must cover all sample transitions")
+    if int(config["validation"].get("every_steps", 0)) <= 0:
+        raise ValueError("validation.every_steps must be positive")
+    if int(config["checkpoint"].get("every_steps", 0)) <= 0:
+        raise ValueError("checkpoint.every_steps must be positive")
+
+
+def action_encoder_config(config: Mapping[str, Any]) -> ActionEncoderConfig:
+    """从 M2 YAML 创建 Minecraft action encoder 配置。"""
+
+    value = config["model"]["action_encoder"]
+    return ActionEncoderConfig(
+        binary_embedding_dim=int(value.get("binary_embedding_dim", 16)),
+        hotbar_embedding_dim=int(value.get("hotbar_embedding_dim", 32)),
+        camera_dim=int(value.get("camera_dim", 64)),
+        cursor_dim=int(value.get("cursor_dim", 64)),
+        component_hidden_dim=int(value.get("component_hidden_dim", 512)),
+        tick_dim=int(value.get("tick_dim", 256)),
+        transformer_depth=int(value.get("depth", 2)),
+        transformer_heads=int(value.get("heads", 8)),
+        transformer_mlp_dim=int(value.get("mlp_dim", 1024)),
+        macro_dim=int(value.get("macro_dim", 1024)),
+        dropout=float(value.get("dropout", 0.0)),
+        camera_clip_degrees=float(value.get("camera_clip_degrees", 180.0)),
+        camera_mu=float(value.get("camera_mu", 255.0)),
+    )
+
+
+def ac_predictor_config(config: Mapping[str, Any]) -> ACPredictorConfig:
+    """从 M2 YAML 创建 block-causal predictor 配置。"""
+
+    value = config["model"]["predictor"]
+    grid = value.get("spatial_grid", (18, 32))
+    if not isinstance(grid, Sequence) or len(grid) != 2:
+        raise ValueError("model.predictor.spatial_grid must contain two integers")
+    return ACPredictorConfig(
+        latent_dim=int(value.get("latent_dim", 1024)),
+        action_dim=int(value.get("action_dim", 1024)),
+        dim=int(value.get("dim", 1024)),
+        depth=int(value.get("depth", 24)),
+        heads=int(value.get("heads", 16)),
+        mlp_dim=int(value.get("mlp_dim", 4096)),
+        context_blocks=int(value.get("context_blocks", 16)),
+        spatial_grid=(int(grid[0]), int(grid[1])),
+        dropout=float(value.get("dropout", 0.1)),
+    )
+
+
+def build_world_model(
+    config: Mapping[str, Any],
+    visual_encoder: FrozenVisualEncoder,
+) -> WorldModel:
+    """创建随机初始化的 M2 action encoder 和 predictor。"""
+
+    validate_world_model_config(config)
+    action = MinecraftActionEncoder(action_encoder_config(config))
+    predictor = ActionConditionedPredictor(ac_predictor_config(config))
+    model = config["model"]
+    return WorldModel(
+        visual_encoder,
+        action,
+        predictor,
+        WorldModelConfig(
+            auto_steps=int(model.get("auto_steps", 2)),
+            encoder_frame_chunk_size=model.get("encoder_frame_chunk_size"),
+        ),
+    )

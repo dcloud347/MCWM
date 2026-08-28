@@ -65,38 +65,33 @@ EMA 和 stop-gradient 默认同时启用，不把它们当作二选一。训练�
 
 **阶段 B：动作条件世界模型训练**
 
-action encoder 和 action-conditioned predictor 全部随机初始化。视觉 encoder 从阶段 A 的本项目 checkpoint 初始化；world model 训练期间继续维护 online/EMA 两份 encoder：
+action encoder 和 action-conditioned predictor 全部随机初始化。视觉 encoder 只加载阶段 A checkpoint 中的 EMA target 权重，并在 M2 中永久冻结。每帧复制为一个静态 2-frame tubelet，独立编码且保留全部 spatial tokens：
 
 ```text
-c_t = (o(t-15), ..., o(t))
-z(t) = pool(E_θ(c_t))
-```
-
-```text
-z_target(t+1) = sg(pool(E_θ̄(c_(t+1))))
+z(t) = frozen_E_EMA([o(t), o(t)])
 ```
 
 ```text
 ẑ(t+1) = P_φ(z(≤t), A(≤t))
 ```
 
-其中，online encoder、action encoder 和 predictor 通过梯度更新；target encoder 仅通过 EMA 更新。
-
-### 3.2 保留 LeWorldModel 的 SIGReg，但不声称是论文的原样复现
-
-动作条件训练的默认损失为：
-
 ```text
-L_wm = L_pred + λL_SIGReg
+L_wm = L_teacher_forced + L_autoregressive
 ```
 
+M2 不维护新的 online/EMA encoder，不对视觉 encoder 反向传播，也不做 spatial mean pooling。
+
+### 3.2 M2 默认使用 normalized latent prediction loss
+
+预测和冻结 target latent 都沿最后一维做无仿射 LayerNorm，然后计算 L1：
+
 ```text
-L_pred = (1 / BT) Σ_b,t ‖ẑ_b(t+1) − z_target,b(t+1)‖₂²
+L_tf = mean(abs(normalize(ẑ_tf) - normalize(z_target)))
+L_ar = mean(abs(normalize(ẑ_ar) - normalize(z_target)))
+L_wm = L_tf + L_ar
 ```
 
-SIGReg 将 online latent 在多个随机方向上的一维投影约束为标准高斯，用于增加特征多样性并提供明确的 collapse 诊断。默认使用 1024 个随机投影、17 个积分 knots，初始 `lambda=0.1`。
-
-与原论文不同，本设计还使用 EMA target 和 stop-gradient。因此实验记录中必须称为“MCWM / LeWM-inspired”，不能把结果写成原始 LeWM 的直接复现。
+正式首版使用 `auto_steps=2`。SIGReg、IDM 和 pixel reconstruction 都不是 M2 默认 loss；若启用，必须作为独立扩展实验。
 
 ### 3.3 所有权重都必须由 MCWM 训练产生
 
@@ -322,10 +317,10 @@ Predictor 是一个 causal Transformer，从随机初始化开始训练：
 | MLP hidden dim | 4096 |
 | output dim | 1024 |
 | dropout | 0.1 |
-| conditioning | per-layer AdaLN-Zero |
-| 参数量 | 约 455M |
+| conditioning | action-token interleaving |
+| 参数量 | 约 305M |
 
-输入为 observation latent history 和 action-block embeddings。视觉 latent、action conditioning 和 predictor 内部空间统一为 1024 维，不设置压缩瓶颈；同维度输入/输出投影只承担特征变换。动作通过每层 AdaLN-Zero 注入；调制层初始化为零，使训练初期不会因随机 action conditioning 破坏视觉 latent，随后逐步学习动作影响。
+输入为 observation latent history 和 action-block embeddings。每个时间点排列为 `[action token, 576 visual tokens]`；同一 block 内完全互相可见，当前 block 可以看到过去 block，但不能看到未来 block。位置编码使用 3D RoPE。
 
 训练使用 causal mask。teacher forcing 下并行预测每个 next latent：
 
@@ -339,32 +334,28 @@ output:  zhat_1 ... zhat_T
 
 ### 5.5 参数预算
 
-`762M` 指实际推理时保留的模型总参数，不包括训练期 EMA 副本、阶段 A masked-video predictor、optimizer state、diagnostic decoder 或可选 IDM head。
+参数预算只统计实际推理保留的 frozen visual encoder、action encoder 和 AC predictor，不包括阶段 A predictor、optimizer state、diagnostic decoder 或可选 IDM head。
 
 | 推理模块 | 目标参数量 |
 |---|---:|
 | EMA Visual Encoder | 约 305M |
 | Action Encoder | 约 2M |
-| Action-Conditioned Predictor | 约 455M |
-| **总计** | **约 762M** |
+| Action-Conditioned Predictor | 约 305M |
+| **总计** | **约 612M** |
 
-允许最终实现落在 740M–785M 范围内，但默认配置以 762M 左右为目标。CI 中增加参数预算测试，防止结构修改后模型无意中变小或膨胀。
+参数预算以实际 `numel()` 为准；结构修改后由测试防止模型无意中变小或膨胀。
 
 参数与 checkpoint 口径：
 
 | 阶段 | 保存参数 | 可梯度参数 | 说明 |
 |---|---:|---:|---|
 | 阶段 A | 约 632M | 约 327M | online encoder 305M + EMA encoder 305M + visual predictor 22M |
-| 阶段 B | 约 1.07B | 约 762M | online encoder 305M + EMA encoder 305M + action encoder 2M + action predictor 455M |
-| 最终推理 | 约 762M | 不适用 | 只保留 EMA encoder、action encoder 和 action predictor |
+| 阶段 B | 约 612M | 约 308M | frozen encoder 305M + action encoder 2M + action predictor 305M |
+| 最终推理 | 约 612M | 不适用 | frozen encoder、action encoder 和 action predictor |
 
-最终推理权重约为 1.52GB（BF16/FP16）或 3.05GB（FP32）。训练峰值显存主要由 640x360 长 clip activation、AdamW state 和 EMA 副本决定，不能只根据权重文件大小估算。
+M2 checkpoint 只保存可训练的 action encoder 和 predictor，并用 path/hash 引用 M1 parent，避免重复保存冻结视觉权重。
 
-### 5.6 SIGReg
-
-SIGReg 在每个时间位置上跨 batch 计算，而不是把所有时间步无条件打平。混合精度训练时，SIGReg 内部投影、sin/cos 和积分统一转为 FP32。
-
-多 GPU 时需要可求梯度的 all-gather，保证每个时间位置拥有足够的全局样本。若暂时只支持单 GPU，配置和日志必须明确标注，不能静默按 local batch 计算。
+### 5.6 M2 latent 诊断
 
 监控项包括：
 
@@ -372,8 +363,8 @@ SIGReg 在每个时间位置上跨 batch 计算，而不是把所有时间步无
 - covariance off-diagonal norm
 - effective rank
 - 平均 pairwise cosine similarity
-- SIGReg statistic
-- online/EMA representation cosine gap
+- predicted/target norm 和 effective-rank gap
+- true/shuffled/no-op action sensitivity
 
 ### 5.7 可选 inverse dynamics head
 
@@ -388,7 +379,7 @@ SIGReg 在每个时间位置上跨 batch 计算，而不是把所有时间步无
 其 loss 按动作类型拆分：binary BCE、hotbar CE、camera Huber。此时总损失为：
 
 ```text
-L = L_pred + λL_SIGReg + βL_IDM
+    L = L_tf + L_ar + βL_IDM
 ```
 
 该配置属于 Minecraft 扩展实验，必须与默认两项损失分开命名 checkpoint 和 run group。
@@ -428,7 +419,7 @@ L = L_pred + λL_SIGReg + βL_IDM
 
 - 读入阶段 A 的 EMA visual checkpoint。
 - 随机初始化 action encoder 和 predictor。
-- 完成 forward、loss、backward、EMA update 和 checkpoint resume。
+- 完成 forward、loss、backward 和 checkpoint resume。
 - 在 1 个 batch 上过拟合，确认真实动作可降低误差。
 - 进行 1、2、4、8 步 autoregressive rollout。
 
@@ -436,32 +427,31 @@ L = L_pred + λL_SIGReg + βL_IDM
 
 ### 6.3 阶段 B1：单步 world model
 
-先只优化 one-step teacher-forced `L_pred + lambda*SIGReg`。视觉 online encoder 用阶段 A 权重初始化并继续微调，EMA encoder 作为 target。
+默认同时优化 teacher-forced normalized L1 和 2-step autoregressive normalized L1。视觉 encoder 使用阶段 A EMA 权重并保持冻结。
 
 初始默认值参考 LeWM 官方训练范围，但针对较长 context 调低 batch：
 
 | 参数 | 默认值 |
 |---|---:|
 | optimizer | AdamW |
-| learning rate | 5e-5 |
-| weight decay | 1e-3 |
-| precision | bf16；SIGReg FP32 |
-| effective batch | 32 clips（通过 DDP/梯度累积） |
-| context length | 16 |
-| macro action ticks K | 4 |
-| SIGReg projections | 1024 |
-| SIGReg lambda | 0.1 |
+| learning rate | 1e-4 |
+| weight decay | 0.05 |
+| precision | bf16；loss FP32 |
+| effective batch | 16 clips（通过梯度累积） |
+| sampled frames | 8 |
+| macro action ticks K | 由真实 PTS 决定 |
+| autoregressive steps | 2 |
 | gradient clip | 1.0 |
 
 ### 6.4 阶段 B2：多步 rollout training
 
-当 B1 的 one-step 指标稳定后，加入 2/4/8 步 open-loop rollout。它仍归入 prediction loss，不增加新的 loss 家族：
+M2 首版固定训练 2-step rollout。后续 M3 在 one-step 指标稳定后，再加入 4/8 步 open-loop rollout；它仍归入 prediction loss，不增加新的 loss 家族：
 
 ```text
 L_pred = Σ_h∈{1,2,4,8} w_h ‖ẑ(t+h) − z_target(t+h)‖₂²
 ```
 
-为避免 EMA target space 与 online input space 的偏差导致不稳定，前期使用 teacher-forced intermediate latent；online/EMA gap 足够小后，再逐步提高 predicted-latent feedback 的比例。该比例必须记录到 checkpoint。
+rollout 从真实初始 latent 开始，后续严格反馈 predictor 自己的输出。
 
 ### 6.5 训练顺序
 
@@ -492,11 +482,11 @@ L_pred = Σ_h∈{1,2,4,8} w_h ‖ẑ(t+h) − z_target(t+h)‖₂²
 
 每个 optimizer step 记录以下训练状态；高开销诊断按较低频率记录，频率全部由配置控制：
 
-- total loss 与各项 loss，例如 visual prediction loss、world-model prediction loss 和 SIGReg。
-- learning rate、EMA momentum、gradient norm、parameter norm 和 AMP loss scale。
+- total loss 与 teacher-forced、autoregressive prediction loss。
+- learning rate、gradient norm、parameter norm 和 AMP loss scale；阶段 A 额外记录 EMA momentum。
 - samples/second、tokens/second、data loading time、step time、显存使用量和累计训练时长。
-- 每组 mask ratio、跨帧一致性统计，以及各 contractor/recorder 分桶在当前 batch 中的占比。
-- latent mean/std、effective rank、pairwise cosine、covariance off-diagonal norm 和 online/EMA cosine gap。
+- 阶段 A 的每组 mask ratio、跨帧一致性统计，以及各 contractor/recorder 分桶占比。
+- latent mean/std、effective rank、pairwise cosine 和 covariance off-diagonal norm；阶段 A 额外记录 online/EMA cosine gap。
 
 每次 validation 记录 validation loss、collapse diagnostics、linear probe、action sensitivity 和多步 rollout 指标中当前阶段适用的部分。可视化采用固定 validation sample ID，以便跨 run 比较：
 
@@ -562,7 +552,7 @@ Benchmark 暂缓不等于不做验证。没有下面这些诊断，world model �
 - latent per-dim std 长时间低于阈值
 - effective rank 急剧下降
 - batch 内 pairwise cosine 接近 1
-- SIGReg loss 异常为 0、NaN 或爆炸
+- normalized latent loss 出现 NaN 或爆炸
 - target encoder 长时间不随 online encoder 更新
 
 发现 collapse 时保存 failure checkpoint 和最近的数据 sample IDs，便于复现。
@@ -716,15 +706,15 @@ MCWM/
 - optimizer step 后 EMA 公式数值正确。
 - gradient accumulation 时每个 optimizer step 只更新一次 EMA。
 - causal predictor 看不到未来 token。
-- AdaLN-Zero 初始 modulation 为零。
 - action mask 对 padding 生效。
-- SIGReg FP32 且有有限梯度。
+- normalized latent L1 为 FP32 且有有限梯度。
 - one-step 与 autoregressive rollout shape/语义一致。
-- 默认 deploy graph 参数量必须在 740M–785M；EMA 训练副本和阶段 A predictor 不得被误计入推理模型。
+- block-causal predictor 看不到未来 frame/action，同一 block 内可通信。
 
 ### 10.3 Checkpoint 测试
 
-- 保存并恢复 online、EMA、predictor、optimizer、scheduler、scaler 和 RNG state。
+- 保存并恢复 action encoder、predictor、optimizer、scheduler、scaler 和 RNG state。
+- M1 parent path/hash 不一致时拒绝 resume。
 - resume 后下一步 loss 与 uninterrupted run 在容差内一致。
 - `external_pretrained=false` provenance 存在。
 - 数据 manifest hash 不一致时拒绝静默 resume。
@@ -752,7 +742,7 @@ MCWM/
 
 ### M2：动作条件 world model
 
-- 实现 action encoder、AdaLN causal predictor 和 SIGReg。
+- 实现 action encoder、action-token block-causal predictor 和 normalized latent loss。
 - 加载我们自己的 M1 encoder，其他模块随机初始化。
 - 完成 B0/B1 训练与 action sensitivity 诊断。
 
@@ -781,13 +771,13 @@ MCWM/
 | VPT 数据对齐错误 | 模型看似不使用动作 | PTS 对齐、overlay 抽检、off-by-one fixture |
 | no-op 被删除 | 惯性和被动动态学错 | 保留真实 no-op，只过滤损坏 transition |
 | 动作空间过度简化 | 无法学习 use/hotbar/GUI | 完整 canonical schema + micro-action encoder |
-| latent collapse | std/rank 降低 | EMA target + stop-grad + SIGReg + 硬报警 |
+| latent collapse | std/rank 降低 | frozen EMA target space + rank/std 硬报警 |
 | predictor 忽略动作 | shuffled action 误差不变 | action sensitivity gate，必要时自训练 IDM head |
 | 长 rollout 漂移 | horizon 增大误差爆炸 | 逐步多步训练、短 horizon MPC、频繁 replan |
 | 第一人称部分可观测 | 相同画面对应不同世界状态 | 16-step context；后续引入 memory/hierarchy |
 | 数据来源偏差 | latent 按 contractor/recorder 聚类 | contractor/recorder 分桶验证 |
 | GUI 与世界控制混杂 | 非法规划动作 | GUI mode 显式编码、macro-action 合法性 mask |
-| 训练规模超预算 | 约 762M 推理模型、640×360 长 clip 成本过高 | 2-frame tubelet、20×20 patch、visible-token encoder、bf16、Flash Attention、activation checkpointing、FSDP/ZeRO、sharded cache |
+| 训练规模超预算 | 约 612M 推理模型、640×360 输入成本过高 | repeated-frame chunking、20×20 patch、bf16、Flash Attention、梯度累积 |
 
 ## 13. 实现时必须保持的原则
 

@@ -106,8 +106,8 @@ class HotbarEncoder(nn.Module):
         )
         if hotbar.dtype not in integer_types:
             raise TypeError("hotbar must be an integer tensor")
-        if bool(((hotbar < 0) | (hotbar > 9)).any()):
-            raise ValueError("hotbar values must be in [0, 9]")
+        # CanonicalActionTick 在入库时已经保证值属于 [0, 9]。这里不再调用
+        # Tensor.item()/bool() 做同步检查，避免每个 GPU batch 都被迫等待 CPU。
         return self.embedding(hotbar.long())
 
 

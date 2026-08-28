@@ -4,6 +4,8 @@ import unittest
 try:
     import torch
     import yaml  # noqa: F401
+    from mcwm.models.ac_predictor import ActionConditionedPredictor
+    from mcwm.models.action_encoder import MinecraftActionEncoder
     from mcwm.training.config import build_visual_jepa, load_yaml_config
 except ModuleNotFoundError:
     torch = None
@@ -23,3 +25,21 @@ class M1ParameterBudgetTest(unittest.TestCase):
         self.assertEqual(encoder, 304_770_048)
         self.assertEqual(predictor, 22_082_944)
         self.assertEqual(total, 631_623_040)
+
+    def test_m2_default_trainable_and_deploy_parameter_budget(self):
+        with torch.device("meta"):
+            action_encoder = MinecraftActionEncoder()
+            predictor = ActionConditionedPredictor()
+
+        action_parameters = sum(
+            parameter.numel() for parameter in action_encoder.parameters()
+        )
+        predictor_parameters = sum(
+            parameter.numel() for parameter in predictor.parameters()
+        )
+        self.assertEqual(action_parameters, 2_181_632)
+        self.assertEqual(predictor_parameters, 305_460_224)
+        self.assertEqual(
+            304_770_048 + action_parameters + predictor_parameters,
+            612_411_904,
+        )

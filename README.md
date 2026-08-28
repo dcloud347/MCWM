@@ -4,11 +4,9 @@ MCWM is a from-scratch, joint-embedding world model for Minecraft 1.16.5. It
 learns from first-person RGB video and keyboard/mouse actions without loading
 external pretrained weights.
 
-The repository currently implements the data layer and visual pretraining
-stage: labeled VPT contractor demonstrations are normalized into a
-timestamp-aligned format, then used to train a masked-video JEPA with an EMA
-target encoder. The action-conditioned world model and planning stack are
-specified in [design.md](design.md), but are not implemented yet.
+The repository implements the data layer, visual pretraining stage, and M2
+action-conditioned latent world-model training stack. No trained checkpoint
+is distributed, and the planning stack remains future work.
 
 ## Project status
 
@@ -16,7 +14,7 @@ specified in [design.md](design.md), but are not implemented yet.
 |-----------|------------------------------------------------------------------------------------------|---------------------------------------------------|
 | M0        | Canonical actions, ingestion, manifests, alignment, audits, and fixtures                 | Implemented                                       |
 | M1        | From-scratch visual encoder, masked-video predictor, EMA, diagnostics, and checkpointing | Implemented; no trained checkpoint is distributed |
-| M2        | Action encoder and action-conditioned latent predictor                                   | Planned                                           |
+| M2        | Action encoder, block-causal predictor, rollout loss, training, and diagnostics            | Implemented; formal training/gates pending         |
 | M3        | Multi-step latent rollout                                                                | Planned                                           |
 | M4        | Online planning smoke test in MineRL (environment only)                                  | Planned                                           |
 
@@ -40,6 +38,10 @@ an online evaluation environment, but it must not contribute training data.
 - EMA target updates, stop-gradient targets, structured spatiotemporal masks,
   collapse diagnostics, W&B logging, and resumable checkpoints.
 - Frozen linear probes and export of the trained EMA visual encoder.
+- A frozen-M1 repeated-frame encoder and timestamp-aligned M2 dataset.
+- Minecraft micro-action encoding with padding-safe temporal aggregation.
+- A frame/block-causal latent predictor with teacher-forced and autoregressive loss.
+- M2 training, parent-verified checkpoint resume, B0 smoke gates, and action-sensitivity diagnostics.
 
 The formal M1 model uses 16 frames sampled at 4 FPS and keeps the native
 `640x360` Minecraft frame. Its Video ViT-Large encoder has 304,770,048
@@ -97,8 +99,16 @@ PYTHONPATH=src python3 scripts/pretrain_visual.py \
   --synthetic
 ```
 
-The tiny configuration is only for tests and local smoke checks. Its output is
-not a valid M1 checkpoint.
+Run the M2 synthetic smoke training after installing the training dependencies:
+
+```bash
+PYTHONPATH=src python3 scripts/train_world_model.py \
+  --config configs/train_world_model_tiny.yaml \
+  --synthetic --max-steps 2
+```
+
+Tiny configurations are only for tests and local smoke checks. Their outputs
+are not valid formal M1 or M2 checkpoints.
 
 ## Data pipeline
 
@@ -283,5 +293,6 @@ default.
 - External pretrained weights, including VPT policy/IDM weights and generic
   visual checkpoints, are not accepted by the training pipeline.
 
-For the full model rationale, future action-conditioned architecture, tests,
-and milestone acceptance criteria, read [design.md](design.md).
+For the full model rationale, M2 contracts, tests, and milestone acceptance
+criteria, read [M2_implementation.md](M2_implementation.md) and
+[design.md](design.md).

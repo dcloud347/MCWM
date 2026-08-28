@@ -1,0 +1,66 @@
+seed: 2026
+device: cuda
+precision: bf16
+output_dir: artifacts/m2-world-model
+m1_checkpoint: artifacts/m1-visual-base/checkpoint-00024000.pt
+data:
+  root: data/canonical
+  train_split: train
+  validation_split: validation
+  frames_per_sample: 8
+  sample_fps: 4
+  samples_per_video: 1
+  batch_size: 1
+  workers: 8
+model:
+  auto_steps: 2
+  encoder_frame_chunk_size: 1
+  action_encoder:
+    binary_embedding_dim: 16
+    hotbar_embedding_dim: 32
+    camera_dim: 64
+    cursor_dim: 64
+    component_hidden_dim: 512
+    tick_dim: 256
+    depth: 2
+    heads: 8
+    mlp_dim: 1024
+    macro_dim: 1024
+    dropout: 0.0
+    camera_clip_degrees: 180.0
+    camera_mu: 255.0
+  predictor:
+    latent_dim: 1024
+    action_dim: 1024
+    dim: 1024
+    depth: 24
+    heads: 16
+    mlp_dim: 4096
+    context_blocks: 16
+    spatial_grid: [18, 32]
+    dropout: 0.1
+optimizer:
+  learning_rate: 0.0001
+  weight_decay: 0.05
+  gradient_clip: 1.0
+  effective_batch_size: 16
+  iterations_per_epoch: 300
+  epochs: 80
+  warmup_steps: 400
+validation:
+  every_steps: 1200
+  batches: 16
+checkpoint:
+  every_steps: 1200
+  keep_last: 3
+  resume: null
+wandb:
+  enabled: true
+  mode: online
+  entity: null
+  project: mcwm
+  group: m2-world-model
+  name: null
+  tags: [vpt, contractor, m2]
+  log_every_steps: 10
+  diagnostics_every_steps: 200

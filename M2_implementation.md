@@ -204,6 +204,8 @@ A_t: variable ticks -> ActionEncoder -> a_t[1024]
 
 ## 5. Frame/Block-Causal Predictor
 
+**实现状态：已完成。**
+
 新增 `src/mcwm/models/ac_predictor.py`。
 
 | 参数 | 默认值 |
@@ -250,6 +252,8 @@ rollout(initial_latent, actions)
 
 ## 6. Teacher-Forced 与 Autoregressive Loss
 
+**实现状态：已完成。**
+
 Teacher-forced path 为每个时间位置提供真实 encoder latent：
 
 ```text
@@ -280,6 +284,8 @@ M2 默认不加 SIGReg、IDM 或 pixel reconstruction loss。Frozen M1 target sp
 
 ## 7. World Model 组合层
 
+**实现状态：已完成。**
+
 新增 `src/mcwm/models/world_model.py`，组合 frozen encoder、Minecraft action encoder、AC predictor、frame normalization、repeated-frame tubelet、teacher-forced path 和 rollout path。
 
 ```text
@@ -302,6 +308,8 @@ z[:, :-1] + action tokens
 `B*8` 个 repeated-frame tubelets 允许按 `encoder_frame_chunk_size` 分块编码。Encoder 冻结且在 `no_grad` 下运行，不保留 activation graph。
 
 ## 8. 训练与 Checkpoint
+
+**实现状态：已完成。**
 
 新增：
 
@@ -326,6 +334,8 @@ Optimizer 只包含 Minecraft action encoder 和 AC predictor。M2 checkpoint �
 
 ## 9. B0 Smoke-Test Gate
 
+**实现状态：gate 与测试代码已完成；真实 M1 checkpoint 验收待正式训练产物。**
+
 1. M1 EMA encoder 以 `strict=true` 加载。
 2. `T=16` 原有输出保持一致。
 3. repeated-frame `T=2` latent probe 通过。
@@ -348,6 +358,8 @@ ratio        = error_real / error_baseline
 正式 gate 在 validation set 上使用置信区间或 permutation test，不只依赖肉眼观察。
 
 ## 10. 诊断与验收
+
+**实现状态：数值诊断与动作敏感性统计已完成；正式 validation 结论待训练。**
 
 每次 validation 记录：
 
@@ -424,9 +436,9 @@ tests/training/
 - Validation 上真实动作的预测误差显著低于 shuffled/no-op。
 - Checkpoint provenance 可追溯到 M1 parent checkpoint 和数据 manifest。
 
-## 14. 与当前 `design.md` 的差异
+## 14. 与 `design.md` 的同步状态
 
-本方案已确定使用官方 V-JEPA 2-AC 主线，因此与当前 `design.md` 中的以下 M2 设计不同：
+`design.md` 已同步为本方案的 V-JEPA 2-AC 主线，包括：
 
 - 不使用滚动 16-frame window 作为单个 state。
 - 不将 spatial tokens mean-pool 为单个 1024 维 state。
@@ -435,7 +447,7 @@ tests/training/
 - 不使用 AdaLN-Zero 作为默认 action conditioning，改为 action-token interleaving。
 - 默认损失不使用 SIGReg，改为 normalized teacher-forced L1 + autoregressive L1。
 
-实现 M2 前应同步更新 `design.md` 的模型、损失、参数预算、checkpoint 和测试口径，避免两份文档长期矛盾。
+后续修改 M2 模型、损失、参数预算、checkpoint 或测试口径时，两份文档必须同时更新。
 
 ## 15. 官方对照资料
 

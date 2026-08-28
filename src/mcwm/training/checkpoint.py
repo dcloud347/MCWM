@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 import random
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -236,3 +237,104 @@ def load_frozen_m1_encoder(
     frozen.requires_grad_(False)
     frozen.eval()
     return frozen, payload
+
+
+def checkpoint_sha256(path: Path) -> str:
+    """流式计算 checkpoint SHA-256，避免把大文件一次读入内存。"""
+
+    digest = sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def save_world_model_checkpoint(
+    path: Path,
+    *,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Optional[Any],
+    scaler: Optional[Any],
+    optimizer_step: int,
+    provenance: CheckpointProvenance,
+    m1_parent_path: str,
+    m1_parent_sha256: str,
+    sampler_epoch: int,
+    batch_offset: int,
+    resume_checkpoint: Optional[str] = None,
+) -> None:
+    """保存 M2 权重和可验证的 M1 parent、sampler 续训状态。"""
+
+    if not m1_parent_path or not m1_parent_sha256:
+        raise ValueError("M2 checkpoint requires an M1 parent path and SHA-256")
+    if provenance.parent_checkpoint != m1_parent_path:
+        raise ValueError("provenance.parent_checkpoint must identify the M1 checkpoint")
+    trainable_state = {
+        name: value
+        for name, value in model.state_dict().items()
+        if not name.startswith("visual_encoder.")
+    }
+    save_checkpoint(
+        path,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=scaler,
+        optimizer_step=optimizer_step,
+        provenance=provenance,
+        model_state_dict=trainable_state,
+        extra={
+            "stage": "m2-world-model",
+            "m1_parent_path": m1_parent_path,
+            "m1_parent_sha256": m1_parent_sha256,
+            "sampler_epoch": int(sampler_epoch),
+            "batch_offset": int(batch_offset),
+            "resume_checkpoint": resume_checkpoint,
+        },
+    )
+
+
+def load_world_model_checkpoint(
+    path: Path,
+    *,
+    model: nn.Module,
+    optimizer: Optional[torch.optim.Optimizer],
+    scheduler: Optional[Any],
+    scaler: Optional[Any],
+    expected_manifest_hash: str,
+    expected_m1_parent_path: str,
+    expected_m1_parent_sha256: str,
+    restore_rng: bool = True,
+) -> Dict[str, Any]:
+    """验证 M1 parent 和数据 manifest 后恢复 M2 训练。"""
+
+    payload = read_checkpoint(
+        path,
+        expected_manifest_hash=expected_manifest_hash,
+    )
+    extra = payload.get("extra", {})
+    if extra.get("stage") != "m2-world-model":
+        raise ValueError("checkpoint is not an M2 world-model checkpoint")
+    if payload["provenance"].get("parent_checkpoint") != expected_m1_parent_path:
+        raise ValueError("M2 provenance identifies a different M1 parent")
+    if extra.get("m1_parent_path") != expected_m1_parent_path:
+        raise ValueError("M2 checkpoint uses a different M1 parent path")
+    if extra.get("m1_parent_sha256") != expected_m1_parent_sha256:
+        raise ValueError("M2 checkpoint uses a different M1 parent hash")
+    missing, unexpected = model.load_state_dict(payload["model"], strict=False)
+    if unexpected or any(not name.startswith("visual_encoder.") for name in missing):
+        raise ValueError("M2 checkpoint model state does not match the current model")
+    if optimizer is not None:
+        optimizer.load_state_dict(payload["optimizer"])
+    if scheduler is not None:
+        if payload["scheduler"] is None:
+            raise ValueError("checkpoint does not contain scheduler state")
+        scheduler.load_state_dict(payload["scheduler"])
+    if scaler is not None:
+        if payload["scaler"] is None:
+            raise ValueError("checkpoint does not contain scaler state")
+        scaler.load_state_dict(payload["scaler"])
+    if restore_rng:
+        restore_rng_state(payload["rng"])
+    return payload

@@ -30,6 +30,7 @@ train = [
 [project.scripts]
 mcwm-audit-data = "mcwm.data.audit:main"
 mcwm-pretrain-visual = "mcwm.training.pretrain_visual:main"
+mcwm-train-world-model = "mcwm.training.train_world_model:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

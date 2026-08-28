@@ -1,0 +1,75 @@
+# CPU smoke test；视觉 encoder 随机初始化后冻结，不代表正式 M1 权重。
+seed: 2026
+device: cpu
+precision: fp32
+output_dir: /tmp/mcwm-m2-tiny
+m1_checkpoint: null
+data:
+  root: /tmp/mcwm-fixture
+  train_split: train
+  validation_split: validation
+  frames_per_sample: 8
+  sample_fps: 4
+  samples_per_video: 1
+  batch_size: 2
+  workers: 0
+model:
+  auto_steps: 2
+  encoder_frame_chunk_size: 4
+  synthetic_visual_encoder:
+    image_height: 20
+    image_width: 20
+    patch_size: 10
+    clip_frames: 16
+    tubelet_size: 2
+    dim: 12
+    depth: 1
+    heads: 3
+    mlp_dim: 24
+  action_encoder:
+    binary_embedding_dim: 2
+    hotbar_embedding_dim: 2
+    camera_dim: 4
+    cursor_dim: 4
+    component_hidden_dim: 16
+    tick_dim: 12
+    depth: 2
+    heads: 3
+    mlp_dim: 24
+    macro_dim: 12
+    dropout: 0.0
+  predictor:
+    latent_dim: 12
+    action_dim: 12
+    dim: 12
+    depth: 2
+    heads: 3
+    mlp_dim: 24
+    context_blocks: 8
+    spatial_grid: [2, 2]
+    dropout: 0.0
+optimizer:
+  learning_rate: 0.001
+  weight_decay: 0.0
+  gradient_clip: 1.0
+  effective_batch_size: 2
+  iterations_per_epoch: 2
+  epochs: 1
+  warmup_steps: 0
+validation:
+  every_steps: 10
+  batches: 1
+checkpoint:
+  every_steps: 1
+  keep_last: 2
+  resume: null
+wandb:
+  enabled: false
+  mode: disabled
+  entity: null
+  project: mcwm
+  group: m2-world-model-tiny
+  name: null
+  tags: [tiny, m2]
+  log_every_steps: 1
+  diagnostics_every_steps: 5
