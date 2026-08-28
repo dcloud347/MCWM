@@ -1,11 +1,11 @@
-# M2 正式双卡配置：单机 2 张 H100 SXM，由 torchrun 启动 2 个 FSDP 进程。
+# M2 正式三卡配置：单机 3 张 H100 SXM，由 torchrun 启动 3 个 FSDP 进程。
 # batch_size 和 encoder_frame_chunk_size 都是“每张 GPU”的数值。
 seed: 2026
 device: cuda
 precision: bf16
-output_dir: artifacts/m2-world-model-2xh100-sxm
+output_dir: artifacts/m2-world-model-3xh100-sxm
 
-# 必须换成真实训练完成的 M1 checkpoint；两张卡会加载同一份冻结 encoder。
+# 必须换成真实训练完成的 M1 checkpoint；三张卡会加载同一份冻结 encoder。
 m1_checkpoint: artifacts/m1-visual-base/checkpoint-00024000.pt
 
 data:
@@ -18,9 +18,9 @@ data:
   sample_fps: 4
   samples_per_video: 8
 
-  # 每张 H100 处理 16 条样本，两张卡的 global micro-batch 为 32。
+  # 每张 H100 处理 16 条样本，三张卡的 global micro-batch 为 48。
   batch_size: 16
-  # 每个 FSDP 进程各启动 8 个 worker，因此整机最多有 16 个解码 worker。
+  # 每个 FSDP 进程各启动 8 个 worker，因此整机最多有 24 个解码 worker。
   workers: 8
 
 model:
@@ -61,27 +61,27 @@ optimizer:
   learning_rate: 0.0001
   weight_decay: 0.05
   gradient_clip: 1.0
-  # 16 samples/GPU x 2 GPUs x 1 micro-step = 32，因此不需要梯度累积。
-  effective_batch_size: 32
+  # 16 samples/GPU x 3 GPUs x 1 micro-step = 48，因此不需要梯度累积。
+  effective_batch_size: 48
   iterations_per_epoch: 200
-  epochs: 80
+  epochs: 60
   # 前约 300 个 optimizer steps 线性增大学习率，之后进入 cosine 衰减阶段。
   warmup_steps: 300
 
 validation:
-  # 两个 rank 分片验证；每 1,200 optimizer steps 各自最多处理 64 个 batches。
+  # 三个 rank 分片验证；每 1,200 optimizer steps 各自最多处理 64 个 batches。
   # 指标会跨 rank 汇总，只有 rank 0 写日志和诊断图片。
-  every_steps: 1200
+  every_steps: 1000
   batches: 64
 
 checkpoint:
-  # 只有 rank 0 写文件；checkpoint 保存两张卡各自的 RNG 和统一 sampler 位置。
-  every_steps: 1200
+  # 只有 rank 0 写文件；checkpoint 保存三张卡各自的 RNG 和统一 sampler 位置。
+  every_steps: 1000
   keep_last: 3
   resume: null
 
 distributed:
-  # 必须使用 torchrun --nproc-per-node=2；直接运行 python 不会启用双卡。
+  # 必须使用 torchrun --nproc-per-node=3；直接运行 python 不会启用三卡。
   strategy: fsdp
 
 wandb:
@@ -90,8 +90,8 @@ wandb:
   mode: online
   entity: null
   project: mcwm
-  group: m2-world-model-2xh100-sxm
+  group: m2-world-model-3xh100-sxm
   name: null
-  tags: [vpt, contractor, m2, 2xh100-sxm, fsdp]
+  tags: [vpt, contractor, m2, 3xh100-sxm, fsdp]
   log_every_steps: 10
   diagnostics_every_steps: 200
