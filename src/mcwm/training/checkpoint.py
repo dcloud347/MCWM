@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 import random
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
@@ -263,6 +263,9 @@ def save_world_model_checkpoint(
     sampler_epoch: int,
     batch_offset: int,
     resume_checkpoint: Optional[str] = None,
+    rng_state: Optional[Mapping[str, Any]] = None,
+    rng_by_rank: Optional[Sequence[Mapping[str, Any]]] = None,
+    world_size: int = 1,
 ) -> None:
     """保存 M2 权重和可验证的 M1 parent、sampler 续训状态。"""
 
@@ -291,7 +294,10 @@ def save_world_model_checkpoint(
             "sampler_epoch": int(sampler_epoch),
             "batch_offset": int(batch_offset),
             "resume_checkpoint": resume_checkpoint,
+            "rng_by_rank": list(rng_by_rank) if rng_by_rank is not None else None,
+            "world_size": int(world_size),
         },
+        rng_state=rng_state,
     )
 
 

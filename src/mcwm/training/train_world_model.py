@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from hashlib import sha256
 import json
 import math
+import os
 from pathlib import Path
 import random
 import subprocess
@@ -15,11 +16,11 @@ from typing import Any, Dict, Iterator, Mapping, Tuple
 
 import numpy as np
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
 from mcwm.data.manifest import DatasetManifest
-from mcwm.data.visual_dataset import ResumableSampler
+from mcwm.data.visual_dataset import DistributedResumableSampler, ResumableSampler
 from mcwm.data.world_model_dataset import (
     WorldModelDataset,
     collate_world_model_samples,
@@ -34,9 +35,11 @@ from mcwm.models.visual_encoder import VisualEncoderConfig
 from mcwm.models.world_model import WorldModel
 from .checkpoint import (
     CheckpointProvenance,
+    capture_rng_state,
     checkpoint_sha256,
     load_frozen_m1_encoder,
     load_world_model_checkpoint,
+    restore_rng_state,
     save_world_model_checkpoint,
 )
 from .config import (
@@ -134,6 +137,51 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _distributed_context(
+    strategy: str,
+    requested_device: str,
+) -> Tuple[int, int, int, torch.device]:
+    """初始化 DDP，并把每个 torchrun 进程绑定到自己的 GPU。"""
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if requested_device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("config requests CUDA, but CUDA is unavailable")
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cpu")
+    if world_size > 1:
+        if strategy != "ddp":
+            raise ValueError("WORLD_SIZE > 1 requires distributed.strategy=ddp")
+        torch.distributed.init_process_group(
+            backend="nccl" if device.type == "cuda" else "gloo"
+        )
+    elif strategy == "ddp" and rank == 0:
+        print("distributed.strategy=ddp requested with one process; using one device")
+    return rank, local_rank, world_size, device
+
+
+def _wrap_distributed(
+    model: WorldModel,
+    *,
+    device: torch.device,
+    world_size: int,
+) -> nn.Module:
+    """单进程直接返回模型，多进程时使用一进程一卡的 DDP。"""
+
+    model.to(device)
+    if world_size == 1:
+        return model
+    return torch.nn.parallel.DistributedDataParallel(
+        model,
+        device_ids=[device.index] if device.type == "cuda" else None,
+        broadcast_buffers=False,
+    )
+
+
 def _git_commit() -> str:
     try:
         result = subprocess.run(
@@ -149,6 +197,7 @@ def _git_commit() -> str:
 
 def _training_signature(config: Mapping[str, Any]) -> str:
     value = resolved_copy(config)
+    value.setdefault("distributed", {"strategy": "none"})
     value.pop("output_dir", None)
     value["checkpoint"].pop("resume", None)
     value["data"].pop("root", None)
@@ -177,13 +226,19 @@ def _make_loaders(
     config: Mapping[str, Any],
     *,
     synthetic: bool,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader, str]:
     data = config["data"]
     seed = int(config.get("seed", 0))
     batch_size = int(data["batch_size"])
     if synthetic:
         visual = config["model"]["synthetic_visual_encoder"]
-        length = max(batch_size * int(config["optimizer"]["iterations_per_epoch"]), 4)
+        length = max(
+            batch_size * world_size * int(config["optimizer"]["iterations_per_epoch"]),
+            batch_size * world_size,
+            4,
+        )
         train_dataset: Dataset = SyntheticWorldModelDataset(
             length,
             frames=int(data["frames_per_sample"]),
@@ -222,26 +277,39 @@ def _make_loaders(
         )
         collate_fn = collate_world_model_samples
 
-    sampler = ResumableSampler(
-        len(train_dataset),
-        seed=seed,
-        seed_clips=True,
-    )
+    if world_size > 1:
+        sampler = DistributedResumableSampler(
+            len(train_dataset),
+            rank=rank,
+            world_size=world_size,
+            seed=seed,
+            seed_clips=True,
+        )
+    else:
+        sampler = ResumableSampler(
+            len(train_dataset),
+            seed=seed,
+            seed_clips=True,
+        )
+    workers = int(data.get("workers", 0))
+    common = {
+        "batch_size": batch_size,
+        "num_workers": workers,
+        "pin_memory": config.get("device") == "cuda",
+        "persistent_workers": workers > 0,
+        "collate_fn": collate_fn,
+    }
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
         sampler=sampler,
-        num_workers=int(data.get("workers", 0)),
         drop_last=True,
-        collate_fn=collate_fn,
+        **common,
     )
     validation_loader = DataLoader(
         validation_dataset,
-        batch_size=batch_size,
         shuffle=False,
-        num_workers=int(data.get("workers", 0)),
         drop_last=False,
-        collate_fn=collate_fn,
+        **common,
     )
     return train_loader, validation_loader, manifest_hash
 
@@ -304,6 +372,38 @@ def _scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, scale)
 
 
+def _accumulation_steps(config: Mapping[str, Any], world_size: int) -> int:
+    """按全局有效 batch 计算每张卡需要执行的梯度累积次数。"""
+
+    per_gpu_batch = int(config["data"]["batch_size"])
+    global_micro_batch = per_gpu_batch * int(world_size)
+    effective_batch = int(config["optimizer"]["effective_batch_size"])
+    if effective_batch % global_micro_batch:
+        raise ValueError(
+            "effective_batch_size must be divisible by data.batch_size * world_size"
+        )
+    return effective_batch // global_micro_batch
+
+
+def _distributed_mean(value: float, device: torch.device) -> float:
+    """把各 rank 的标量平均，供 rank 0 记录全局训练指标。"""
+
+    result = torch.tensor(value, device=device, dtype=torch.float64)
+    if torch.distributed.is_initialized():
+        torch.distributed.all_reduce(result, op=torch.distributed.ReduceOp.SUM)
+        result.div_(torch.distributed.get_world_size())
+    return float(result.item())
+
+
+def _distributed_max(value: float, device: torch.device) -> float:
+    """返回所有 rank 中的最大值，吞吐统计以最慢进程为准。"""
+
+    result = torch.tensor(value, device=device, dtype=torch.float64)
+    if torch.distributed.is_initialized():
+        torch.distributed.all_reduce(result, op=torch.distributed.ReduceOp.MAX)
+    return float(result.item())
+
+
 @torch.no_grad()
 def validate(
     model: WorldModel,
@@ -352,19 +452,70 @@ def _prune_checkpoints(output_dir: Path, keep_last: int) -> None:
         path.unlink()
 
 
+def _save_distributed_checkpoint(
+    path: Path,
+    *,
+    model: WorldModel,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    scaler: Any,
+    optimizer_step: int,
+    provenance: CheckpointProvenance,
+    m1_parent_path: str,
+    m1_parent_hash: str,
+    sampler_epoch: int,
+    batch_offset: int,
+    resume_path: Any,
+    rank: int,
+    world_size: int,
+) -> None:
+    """收集各 rank 的 RNG 状态，并只让 rank 0 原子保存 checkpoint。"""
+
+    local_rng = capture_rng_state()
+    if world_size > 1:
+        rng_by_rank = [None for _ in range(world_size)]
+        torch.distributed.all_gather_object(rng_by_rank, local_rng)
+    else:
+        rng_by_rank = [local_rng]
+    if rank == 0:
+        save_world_model_checkpoint(
+            path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            optimizer_step=optimizer_step,
+            provenance=provenance,
+            m1_parent_path=m1_parent_path,
+            m1_parent_sha256=m1_parent_hash,
+            sampler_epoch=sampler_epoch,
+            batch_offset=batch_offset,
+            resume_checkpoint=str(resume_path) if resume_path else None,
+            rng_state=local_rng,
+            rng_by_rank=rng_by_rank,
+            world_size=world_size,
+        )
+    if world_size > 1:
+        torch.distributed.barrier()
+
+
 def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     """训练 M2，并返回最终 checkpoint 路径。"""
 
     validate_world_model_config(config)
     seed = int(config.get("seed", 0))
-    _seed_everything(seed)
-    device = torch.device(str(config["device"]))
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("config requests CUDA, but CUDA is unavailable")
+    strategy = str(config.get("distributed", {}).get("strategy", "none"))
+    rank, _, world_size, device = _distributed_context(
+        strategy,
+        str(config["device"]),
+    )
+    _seed_everything(seed + rank)
 
     train_loader, validation_loader, manifest_hash = _make_loaders(
         config,
         synthetic=synthetic,
+        rank=rank,
+        world_size=world_size,
     )
     if synthetic:
         visual_encoder = _synthetic_visual_encoder(config)
@@ -386,8 +537,13 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
         m1_parent_path = str(m1_path)
         m1_parent_hash = checkpoint_sha256(m1_path)
 
-    model = build_world_model(config, visual_encoder).to(device)
-    trainable = list(model.trainable_parameters())
+    base_model = build_world_model(config, visual_encoder)
+    trainable = list(base_model.trainable_parameters())
+    model = _wrap_distributed(
+        base_model,
+        device=device,
+        world_size=world_size,
+    )
     optimizer_config = config["optimizer"]
     optimizer = torch.optim.AdamW(
         trainable,
@@ -406,11 +562,8 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     except AttributeError:
         scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
 
-    per_step_batch = int(config["data"]["batch_size"])
     effective_batch = int(optimizer_config["effective_batch_size"])
-    if effective_batch % per_step_batch:
-        raise ValueError("effective_batch_size must be divisible by data.batch_size")
-    accumulation_steps = effective_batch // per_step_batch
+    accumulation_steps = _accumulation_steps(config, world_size)
     optimizer_step = 0
     sampler_epoch = 0
     batch_offset = 0
@@ -419,30 +572,45 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     if resume_path:
         resume_payload = load_world_model_checkpoint(
             Path(resume_path),
-            model=model,
+            model=base_model,
             optimizer=optimizer,
             scheduler=scheduler,
             scaler=scaler if use_scaler else None,
             expected_manifest_hash=manifest_hash,
             expected_m1_parent_path=m1_parent_path,
             expected_m1_parent_sha256=m1_parent_hash,
+            restore_rng=False,
         )
         saved_signature = _training_signature(
             resume_payload["provenance"]["config"]
         )
         if saved_signature != _training_signature(config):
             raise ValueError("resume changes M2 model/data/optimizer semantics")
+        saved_world_size = int(resume_payload["extra"].get("world_size", 1))
+        if saved_world_size != world_size:
+            raise ValueError(
+                "M2 DDP resume requires the same world_size as the saved checkpoint"
+            )
         optimizer_step = int(resume_payload["optimizer_step"])
         sampler_epoch = int(resume_payload["extra"]["sampler_epoch"])
         batch_offset = int(resume_payload["extra"]["batch_offset"])
+        rng_by_rank = resume_payload["extra"].get("rng_by_rank")
+        if isinstance(rng_by_rank, list) and len(rng_by_rank) == world_size:
+            restore_rng_state(rng_by_rank[rank])
+        else:
+            restore_rng_state(resume_payload["rng"])
 
     output_dir = Path(str(config["output_dir"]))
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    if world_size > 1:
+        torch.distributed.barrier()
     logger = TrainingLogger(
         output_dir,
         config=resolved_copy(config),
         wandb_config=config["wandb"],
         run_id=(resume_payload or {}).get("provenance", {}).get("wandb_run_id"),
+        rank=rank,
     )
     provenance = CheckpointProvenance(
         git_commit=_git_commit(),
@@ -468,10 +636,16 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
             step_started = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
             accumulated = {"loss": 0.0, "teacher": 0.0, "autoregressive": 0.0}
-            for _ in range(accumulation_steps):
+            for micro_step in range(accumulation_steps):
                 raw_batch, sampler_epoch, batch_offset = next(batches)
                 batch = _to_device(raw_batch, device)
-                with _autocast_context(device, str(config["precision"])):
+                synchronized = micro_step == accumulation_steps - 1
+                sync_context = (
+                    nullcontext()
+                    if synchronized or not hasattr(model, "no_sync")
+                    else model.no_sync()
+                )
+                with sync_context, _autocast_context(device, str(config["precision"])):
                     output = model(**batch)
                     loss = output["loss"] / accumulation_steps
                 if use_scaler:
@@ -490,7 +664,16 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                 trainable,
                 float(optimizer_config.get("gradient_clip", 1.0)),
             )
-            if not torch.isfinite(gradient_norm):
+            finite_step = torch.tensor(
+                int(torch.isfinite(gradient_norm)),
+                device=device,
+            )
+            if torch.distributed.is_initialized():
+                torch.distributed.all_reduce(
+                    finite_step,
+                    op=torch.distributed.ReduceOp.MIN,
+                )
+            if not bool(finite_step.item()):
                 raise RuntimeError("non-finite M2 gradient")
             if use_scaler:
                 scaler.step(optimizer)
@@ -501,19 +684,34 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
             optimizer_step += 1
 
             if optimizer_step % int(config["wandb"].get("log_every_steps", 10)) == 0:
-                step_seconds = time.perf_counter() - step_started
+                step_seconds = _distributed_max(
+                    time.perf_counter() - step_started,
+                    device,
+                )
+                train_loss = _distributed_mean(
+                    accumulated["loss"] / accumulation_steps,
+                    device,
+                )
+                teacher_loss = _distributed_mean(
+                    accumulated["teacher"] / accumulation_steps,
+                    device,
+                )
+                autoregressive_loss = _distributed_mean(
+                    accumulated["autoregressive"] / accumulation_steps,
+                    device,
+                )
                 logger.log(
                     {
-                        "train/loss": accumulated["loss"] / accumulation_steps,
-                        "train/teacher_forced_loss": accumulated["teacher"]
-                        / accumulation_steps,
-                        "train/autoregressive_loss": accumulated["autoregressive"]
-                        / accumulation_steps,
+                        "train/loss": train_loss,
+                        "train/teacher_forced_loss": teacher_loss,
+                        "train/autoregressive_loss": autoregressive_loss,
                         "train/gradient_norm": float(gradient_norm),
                         "train/learning_rate": scheduler.get_last_lr()[0],
                         "system/step_seconds": step_seconds,
                         "system/samples_per_second": effective_batch
                         / max(step_seconds, 1e-9),
+                        "system/world_size": world_size,
+                        "system/accumulation_steps": accumulation_steps,
                         "system/max_memory_gib": (
                             torch.cuda.max_memory_allocated(device) / 2**30
                             if device.type == "cuda"
@@ -523,62 +721,79 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                     step=optimizer_step,
                 )
             if optimizer_step % int(config["validation"]["every_steps"]) == 0:
-                validation_metrics, validation_images = validate(
-                    model,
-                    validation_loader,
-                    device=device,
-                    precision=str(config["precision"]),
-                    batches=int(config["validation"]["batches"]),
-                )
-                logger.log(
-                    validation_metrics,
-                    step=optimizer_step,
-                )
-                logger.log_images(
-                    "validation/spatial_token_error",
-                    validation_images,
-                    step=optimizer_step,
-                )
+                if world_size > 1:
+                    torch.distributed.barrier()
+                if rank == 0:
+                    validation_metrics, validation_images = validate(
+                        base_model,
+                        validation_loader,
+                        device=device,
+                        precision=str(config["precision"]),
+                        batches=int(config["validation"]["batches"]),
+                    )
+                    logger.log(
+                        validation_metrics,
+                        step=optimizer_step,
+                    )
+                    logger.log_images(
+                        "validation/spatial_token_error",
+                        validation_images,
+                        step=optimizer_step,
+                    )
+                if world_size > 1:
+                    torch.distributed.barrier()
             if optimizer_step % int(config["checkpoint"]["every_steps"]) == 0:
                 last_checkpoint = output_dir / f"checkpoint-{optimizer_step:08d}.pt"
-                save_world_model_checkpoint(
+                _save_distributed_checkpoint(
                     last_checkpoint,
-                    model=model,
+                    model=base_model,
                     optimizer=optimizer,
                     scheduler=scheduler,
                     scaler=scaler if use_scaler else None,
                     optimizer_step=optimizer_step,
                     provenance=provenance,
                     m1_parent_path=m1_parent_path,
-                    m1_parent_sha256=m1_parent_hash,
+                    m1_parent_hash=m1_parent_hash,
                     sampler_epoch=sampler_epoch,
                     batch_offset=batch_offset,
-                    resume_checkpoint=str(resume_path) if resume_path else None,
+                    resume_path=resume_path,
+                    rank=rank,
+                    world_size=world_size,
                 )
-                _prune_checkpoints(
-                    output_dir,
-                    int(config["checkpoint"].get("keep_last", 3)),
-                )
+                if rank == 0:
+                    _prune_checkpoints(
+                        output_dir,
+                        int(config["checkpoint"].get("keep_last", 3)),
+                    )
 
         final_checkpoint = output_dir / f"checkpoint-{optimizer_step:08d}.pt"
-        if final_checkpoint != last_checkpoint or not final_checkpoint.exists():
-            save_world_model_checkpoint(
+        checkpoint_exists = final_checkpoint.exists() if rank == 0 else False
+        if world_size > 1:
+            state = [checkpoint_exists]
+            torch.distributed.broadcast_object_list(state, src=0)
+            checkpoint_exists = bool(state[0])
+        if not checkpoint_exists:
+            _save_distributed_checkpoint(
                 final_checkpoint,
-                model=model,
+                model=base_model,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 scaler=scaler if use_scaler else None,
                 optimizer_step=optimizer_step,
                 provenance=provenance,
                 m1_parent_path=m1_parent_path,
-                m1_parent_sha256=m1_parent_hash,
+                m1_parent_hash=m1_parent_hash,
                 sampler_epoch=sampler_epoch,
                 batch_offset=batch_offset,
-                resume_checkpoint=str(resume_path) if resume_path else None,
+                resume_path=resume_path,
+                rank=rank,
+                world_size=world_size,
             )
         return final_checkpoint
     finally:
         logger.finish()
+        if world_size > 1:
+            torch.distributed.destroy_process_group()
 
 
 def main() -> None:
@@ -600,7 +815,8 @@ def main() -> None:
         config["optimizer"]["iterations_per_epoch"] = int(args.max_steps)
         config["optimizer"]["epochs"] = 1
     checkpoint = train(config, synthetic=args.synthetic)
-    print(checkpoint)
+    if int(os.environ.get("RANK", "0")) == 0:
+        print(checkpoint)
 
 
 if __name__ == "__main__":

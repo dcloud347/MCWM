@@ -1,0 +1,93 @@
+# M2 正式双卡配置：单机 2 张 H100 SXM，由 torchrun 启动 2 个 DDP 进程。
+# batch_size 和 encoder_frame_chunk_size 都是“每张 GPU”的数值。
+seed: 2026
+device: cuda
+precision: bf16
+output_dir: artifacts/m2-world-model-2xh100-sxm
+
+# 必须换成真实训练完成的 M1 checkpoint；两张卡会加载同一份冻结 encoder。
+m1_checkpoint: artifacts/m1-visual-base/checkpoint-00024000.pt
+
+data:
+  root: data/canonical
+  train_split: train
+  validation_split: validation
+
+  # 每条样本为 12 帧和 11 个 action blocks，在 4 FPS 下覆盖约 2.75 秒。
+  frames_per_sample: 12
+  sample_fps: 4
+  samples_per_video: 8
+
+  # 每张 H100 处理 32 条样本，两张卡的 global micro-batch 为 64。
+  batch_size: 32
+  # 每个 DDP 进程各启动 8 个 worker，因此整机最多有 16 个解码 worker。
+  workers: 8
+
+model:
+  # 从真实首帧开始，连续反馈模型自己的预测结果 6 步，约为 1.5 秒。
+  auto_steps: 6
+  # 每张卡一次编码本地 batch 的全部 32 x 12 = 384 帧。
+  encoder_frame_chunk_size: 384
+
+  action_encoder:
+    binary_embedding_dim: 16
+    hotbar_embedding_dim: 32
+    camera_dim: 64
+    cursor_dim: 64
+    component_hidden_dim: 512
+    tick_dim: 256
+    depth: 2
+    heads: 8
+    mlp_dim: 1024
+    macro_dim: 1024
+    dropout: 0.0
+    camera_clip_degrees: 180.0
+    camera_mu: 255.0
+
+  predictor:
+    latent_dim: 1024
+    action_dim: 1024
+    dim: 1024
+    depth: 24
+    heads: 16
+    mlp_dim: 4096
+    context_blocks: 16
+    spatial_grid: [18, 32]
+    dropout: 0.1
+
+optimizer:
+  learning_rate: 0.0001
+  weight_decay: 0.05
+  gradient_clip: 1.0
+  # 32 samples/GPU x 2 GPUs x 1 micro-step = 64，因此不需要梯度累积。
+  effective_batch_size: 64
+  iterations_per_epoch: 300
+  epochs: 80
+  warmup_steps: 400
+
+validation:
+  # rank 0 每 1,200 optimizer steps 验证 32 个 batches，另一个 rank 同步等待。
+  every_steps: 1200
+  batches: 32
+
+checkpoint:
+  # 只有 rank 0 写文件；checkpoint 保存两张卡各自的 RNG 和统一 sampler 位置。
+  every_steps: 1200
+  keep_last: 3
+  resume: null
+
+distributed:
+  # 必须使用 torchrun --nproc-per-node=2；直接运行 python 不会启用双卡。
+  strategy: ddp
+
+wandb:
+  # 只有 rank 0 连接 W&B 和写本地 metrics.jsonl。
+  enabled: true
+  mode: online
+  entity: null
+  project: mcwm
+  group: m2-world-model-2xh100-sxm
+  name: null
+  tags: [vpt, contractor, m2, 2xh100-sxm, ddp]
+  log_every_steps: 10
+  diagnostics_every_steps: 200

@@ -25,6 +25,7 @@ class WorldModelCheckpointTest(unittest.TestCase):
             payload = read_checkpoint(path)
 
         self.assertEqual(payload["extra"]["stage"], "m2-world-model")
+        self.assertEqual(payload["extra"]["world_size"], 1)
         self.assertEqual(
             payload["extra"]["m1_parent_path"],
             "synthetic://random-frozen-m1",

@@ -107,6 +107,18 @@ PYTHONPATH=src python3 scripts/train_world_model.py \
   --synthetic --max-steps 2
 ```
 
+Run formal M2 training on one node with two H100 SXM GPUs:
+
+```bash
+wandb login
+PYTHONPATH=src torchrun --standalone --nproc-per-node=2 \
+  -m mcwm.training.train_world_model \
+  --config configs/train_world_model_2xh100_sxm.yaml
+```
+
+For this DDP configuration, `data.batch_size` is per GPU and
+`optimizer.effective_batch_size` is global across both GPUs.
+
 Tiny configurations are only for tests and local smoke checks. Their outputs
 are not valid formal M1 or M2 checkpoints.
 

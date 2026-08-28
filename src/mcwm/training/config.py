@@ -212,6 +212,13 @@ def validate_world_model_config(config: Mapping[str, Any]) -> None:
     if config.get("precision") not in {"fp32", "bf16", "fp16"}:
         raise ValueError("precision must be fp32, bf16 or fp16")
 
+    distributed = config.get("distributed", {})
+    if not isinstance(distributed, Mapping):
+        raise ValueError("distributed must be a mapping")
+    strategy = str(distributed.get("strategy", "none"))
+    if strategy not in {"none", "ddp"}:
+        raise ValueError("M2 distributed.strategy must be none or ddp")
+
     data = config["data"]
     for name in ("frames_per_sample", "sample_fps", "samples_per_video", "batch_size"):
         if int(data.get(name, 0)) <= 0:

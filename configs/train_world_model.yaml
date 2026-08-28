@@ -1,8 +1,8 @@
 # M2 世界模型正式训练配置。
 #
-# 一条样本包含 8 帧画面，以及相邻画面之间的 7 个 action blocks：
-#   frames:  [B, 8, 3, 360, 640]
-#   actions: [B, 7, K, ...]，K 是 padding 后的最大 tick 数
+# 一条样本包含 12 帧画面，以及相邻画面之间的 11 个 action blocks：
+#   frames:  [B, 12, 3, 360, 640]
+#   actions: [B, 11, K, ...]，K 是 padding 后的最大 tick 数
 # 冻结的 M1 visual encoder 把每帧变成 576 个 visual tokens；训练时只更新
 # Minecraft Action Encoder 和 Frame/Block-Causal Predictor。
 
@@ -31,8 +31,8 @@ data:
   train_split: train
   validation_split: validation
 
-  # 每条样本取 8 帧，因此会形成 7 个“当前帧 -> 下一帧”的预测区间。
-  frames_per_sample: 8
+  # 每条样本取 12 帧，因此会形成 11 个“当前帧 -> 下一帧”的预测区间。
+  frames_per_sample: 12
 
   # 按 4 FPS 抽取画面，理想情况下相邻画面的 PTS 间隔约为 250 毫秒。
   # 两个画面 PTS 之间的全部原始 action ticks 都会归入对应 action block。
@@ -51,14 +51,14 @@ data:
 
 model:
   # 自回归 loss 连续预测几步。
-  # 这里为 4：从真实 z0 开始，连续使用模型自己的预测结果向后滚动 4 步。
-  # 在 4 FPS 下对应约 1 秒；总 loss 同时包含 teacher-forced 和该自回归 loss。
-  auto_steps: 4
+  # 这里为 6：从真实 z0 开始，连续使用模型自己的预测结果向后滚动 6 步。
+  # 在 4 FPS 下对应约 1.5 秒；总 loss 同时包含 teacher-forced 和该自回归 loss。
+  auto_steps: 6
 
   # 冻结的 visual encoder 每次处理多少张展平后的帧。
-  # 当前 batch_size=32、每条样本 8 帧，共 256 帧，因此 256 会一次编码完整 batch。
+  # 当前 batch_size=32、每条样本 12 帧，共 384 帧，因此 384 会一次编码完整 batch。
   # 这是最高吞吐、同时也是最高显存占用的设置。
-  encoder_frame_chunk_size: 256
+  encoder_frame_chunk_size: 384
 
   action_encoder:
     # 14 个二进制动作分量各自使用独立 embedding，每个 embedding 输出 16 维。
@@ -109,7 +109,7 @@ model:
     mlp_dim: 4096
 
     # Predictor 最多允许同时看到多少个时间 block。
-    # 当前 8 帧样本只有 7 个预测 block，因此 16 留出了更长序列的余量。
+    # 当前 12 帧样本有 11 个预测 block，因此 16 仍留有更长序列的余量。
     context_blocks: 16
 
     # 一帧的 visual tokens 排列为 18 行 x 32 列，共 576 个空间位置。
@@ -159,6 +159,10 @@ checkpoint:
   # 恢复训练时填写 M2 checkpoint 路径；null 表示从头开始训练 M2。
   # 恢复时会校验配置、dataset manifest 和 M1 父 checkpoint 是否一致。
   resume: null
+
+distributed:
+  # none 表示单进程训练。双卡配置使用 ddp，并由 torchrun 启动两个进程。
+  strategy: none
 
 wandb:
   # 是否把训练指标记录到 Weights & Biases。

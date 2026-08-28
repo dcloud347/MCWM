@@ -427,7 +427,7 @@ M2 checkpoint 只保存可训练的 action encoder 和 predictor，并用 path/h
 
 ### 6.3 阶段 B1：单步 world model
 
-默认同时优化 teacher-forced normalized L1 和 2-step autoregressive normalized L1。视觉 encoder 使用阶段 A EMA 权重并保持冻结。
+默认同时优化 teacher-forced normalized L1 和可配置的多步 autoregressive normalized L1。视觉 encoder 使用阶段 A EMA 权重并保持冻结。
 
 初始默认值参考 LeWM 官方训练范围，但针对较长 context 调低 batch：
 
@@ -437,18 +437,19 @@ M2 checkpoint 只保存可训练的 action encoder 和 predictor，并用 path/h
 | learning rate | 1e-4 |
 | weight decay | 0.05 |
 | precision | bf16；loss FP32 |
-| effective batch | 16 clips（通过梯度累积） |
-| sampled frames | 8 |
+| effective batch | 64 clips（双卡全局 batch） |
+| sampled frames | 12 |
 | macro action ticks K | 由真实 PTS 决定 |
-| autoregressive steps | 2 |
+| autoregressive steps | 6 |
 | gradient clip | 1.0 |
 
 ### 6.4 阶段 B2：多步 rollout training
 
-M2 首版固定训练 2-step rollout。后续 M3 在 one-step 指标稳定后，再加入 4/8 步 open-loop rollout；它仍归入 prediction loss，不增加新的 loss 家族：
+M2 正式配置训练 6-step rollout，并保留较短 horizon 指标。后续 M3 可继续加入 8 步及更长 open-loop rollout；它仍归入 prediction loss，不增加新的 loss 家族：
 
 ```text
-L_pred = Σ_h∈{1,2,4,8} w_h ‖ẑ(t+h) − z_target(t+h)‖₂²
+L_auto = (1/6) Σ_h=1..6 ‖LN(ẑ(t+h)) − LN(z_target(t+h))‖₁
+L_pred = L_teacher + L_auto
 ```
 
 rollout 从真实初始 latent 开始，后续严格反馈 predictor 自己的输出。
@@ -714,6 +715,7 @@ MCWM/
 ### 10.3 Checkpoint 测试
 
 - 保存并恢复 action encoder、predictor、optimizer、scheduler、scaler 和 RNG state。
+- DDP checkpoint 保存各 rank 的 RNG，并在 world size 改变时拒绝直接 resume。
 - M1 parent path/hash 不一致时拒绝 resume。
 - resume 后下一步 loss 与 uninterrupted run 在容差内一致。
 - `external_pretrained=false` provenance 存在。
@@ -745,6 +747,7 @@ MCWM/
 - 实现 action encoder、action-token block-causal predictor 和 normalized latent loss。
 - 加载我们自己的 M1 encoder，其他模块随机初始化。
 - 完成 B0/B1 训练与 action sensitivity 诊断。
+- 支持单机双卡 DDP：数据按 rank 分片，梯度同步，rank 0 独占验证、W&B 和 checkpoint。
 
 完成条件：真实动作条件显著优于 shuffled/no-op，one-step validation loss 稳定。
 
