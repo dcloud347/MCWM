@@ -216,8 +216,8 @@ def validate_world_model_config(config: Mapping[str, Any]) -> None:
     if not isinstance(distributed, Mapping):
         raise ValueError("distributed must be a mapping")
     strategy = str(distributed.get("strategy", "none"))
-    if strategy not in {"none", "ddp"}:
-        raise ValueError("M2 distributed.strategy must be none or ddp")
+    if strategy not in {"none", "fsdp"}:
+        raise ValueError("M2 distributed.strategy must be none or fsdp")
 
     data = config["data"]
     for name in ("frames_per_sample", "sample_fps", "samples_per_video", "batch_size"):

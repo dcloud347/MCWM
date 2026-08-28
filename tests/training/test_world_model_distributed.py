@@ -30,19 +30,19 @@ class WorldModelDistributedTest(unittest.TestCase):
             self.repository / "configs" / "train_world_model_2xh100_sxm.yaml"
         )
         validate_world_model_config(config)
-        self.assertEqual(config["distributed"]["strategy"], "ddp")
+        self.assertEqual(config["distributed"]["strategy"], "fsdp")
         self.assertEqual(_accumulation_steps(config, world_size=2), 1)
         self.assertEqual(config["model"]["encoder_frame_chunk_size"], 384)
 
-    def test_ddp_strategy_is_valid_but_fsdp_is_rejected(self):
-        ddp_config = deepcopy(self.config)
-        ddp_config["distributed"] = {"strategy": "ddp"}
-        validate_world_model_config(ddp_config)
-
+    def test_fsdp_strategy_is_valid_but_ddp_is_rejected(self):
         fsdp_config = deepcopy(self.config)
         fsdp_config["distributed"] = {"strategy": "fsdp"}
-        with self.assertRaisesRegex(ValueError, "none or ddp"):
-            validate_world_model_config(fsdp_config)
+        validate_world_model_config(fsdp_config)
+
+        ddp_config = deepcopy(self.config)
+        ddp_config["distributed"] = {"strategy": "ddp"}
+        with self.assertRaisesRegex(ValueError, "none or fsdp"):
+            validate_world_model_config(ddp_config)
 
     def test_effective_batch_is_global_across_ranks(self):
         config = deepcopy(self.config)

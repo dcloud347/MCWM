@@ -116,7 +116,7 @@ PYTHONPATH=src torchrun --standalone --nproc-per-node=2 \
   --config configs/train_world_model_2xh100_sxm.yaml
 ```
 
-For this DDP configuration, `data.batch_size` is per GPU and
+For this FSDP configuration, `data.batch_size` is per GPU and
 `optimizer.effective_batch_size` is global across both GPUs.
 
 Tiny configurations are only for tests and local smoke checks. Their outputs

@@ -1,4 +1,4 @@
-# M2 正式双卡配置：单机 2 张 H100 SXM，由 torchrun 启动 2 个 DDP 进程。
+# M2 正式双卡配置：单机 2 张 H100 SXM，由 torchrun 启动 2 个 FSDP 进程。
 # batch_size 和 encoder_frame_chunk_size 都是“每张 GPU”的数值。
 seed: 2026
 device: cuda
@@ -20,7 +20,7 @@ data:
 
   # 每张 H100 处理 32 条样本，两张卡的 global micro-batch 为 64。
   batch_size: 32
-  # 每个 DDP 进程各启动 8 个 worker，因此整机最多有 16 个解码 worker。
+  # 每个 FSDP 进程各启动 8 个 worker，因此整机最多有 16 个解码 worker。
   workers: 8
 
 model:
@@ -66,7 +66,8 @@ optimizer:
   warmup_steps: 400
 
 validation:
-  # rank 0 每 1,200 optimizer steps 验证 32 个 batches，另一个 rank 同步等待。
+  # 两个 rank 分片验证；每 1,200 optimizer steps 各自最多处理 32 个 batches。
+  # 指标会跨 rank 汇总，只有 rank 0 写日志和诊断图片。
   every_steps: 1200
   batches: 32
 
@@ -78,7 +79,7 @@ checkpoint:
 
 distributed:
   # 必须使用 torchrun --nproc-per-node=2；直接运行 python 不会启用双卡。
-  strategy: ddp
+  strategy: fsdp
 
 wandb:
   # 只有 rank 0 连接 W&B 和写本地 metrics.jsonl。
@@ -88,6 +89,6 @@ wandb:
   project: mcwm
   group: m2-world-model-2xh100-sxm
   name: null
-  tags: [vpt, contractor, m2, 2xh100-sxm, ddp]
+  tags: [vpt, contractor, m2, 2xh100-sxm, fsdp]
   log_every_steps: 10
   diagnostics_every_steps: 200

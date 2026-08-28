@@ -161,7 +161,7 @@ checkpoint:
   resume: null
 
 distributed:
-  # none 表示单进程训练。双卡配置使用 ddp，并由 torchrun 启动两个进程。
+  # none 表示单进程训练。双卡配置使用 fsdp，并由 torchrun 启动两个进程。
   strategy: none
 
 wandb:

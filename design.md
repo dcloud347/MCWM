@@ -715,7 +715,7 @@ MCWM/
 ### 10.3 Checkpoint 测试
 
 - 保存并恢复 action encoder、predictor、optimizer、scheduler、scaler 和 RNG state。
-- DDP checkpoint 保存各 rank 的 RNG，并在 world size 改变时拒绝直接 resume。
+- FSDP checkpoint 保存各 rank 的 RNG，并在 world size 改变时拒绝直接 resume。
 - M1 parent path/hash 不一致时拒绝 resume。
 - resume 后下一步 loss 与 uninterrupted run 在容差内一致。
 - `external_pretrained=false` provenance 存在。
@@ -747,7 +747,7 @@ MCWM/
 - 实现 action encoder、action-token block-causal predictor 和 normalized latent loss。
 - 加载我们自己的 M1 encoder，其他模块随机初始化。
 - 完成 B0/B1 训练与 action sensitivity 诊断。
-- 支持单机双卡 DDP：数据按 rank 分片，梯度同步，rank 0 独占验证、W&B 和 checkpoint。
+- 支持单机双卡 FSDP：数据和模型状态按 rank 分片，验证指标跨 rank 汇总，rank 0 独占 W&B 和 checkpoint 写入。
 
 完成条件：真实动作条件显著优于 shuffled/no-op，one-step validation loss 稳定。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+from functools import partial
 from hashlib import sha256
 import json
 import math
@@ -26,7 +27,7 @@ from mcwm.data.world_model_dataset import (
     collate_world_model_samples,
 )
 from mcwm.diagnostics.world_model import (
-    action_sensitivity_report,
+    action_sensitivity_from_predictions,
     spatial_error_images,
     world_model_prediction_metrics,
 )
@@ -141,7 +142,7 @@ def _distributed_context(
     strategy: str,
     requested_device: str,
 ) -> Tuple[int, int, int, torch.device]:
-    """初始化 DDP，并把每个 torchrun 进程绑定到自己的 GPU。"""
+    """初始化 FSDP 通信，并把每个 torchrun 进程绑定到自己的 GPU。"""
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -154,13 +155,13 @@ def _distributed_context(
     else:
         device = torch.device("cpu")
     if world_size > 1:
-        if strategy != "ddp":
-            raise ValueError("WORLD_SIZE > 1 requires distributed.strategy=ddp")
+        if strategy != "fsdp":
+            raise ValueError("WORLD_SIZE > 1 requires distributed.strategy=fsdp")
         torch.distributed.init_process_group(
             backend="nccl" if device.type == "cuda" else "gloo"
         )
-    elif strategy == "ddp" and rank == 0:
-        print("distributed.strategy=ddp requested with one process; using one device")
+    elif strategy == "fsdp" and rank == 0:
+        print("distributed.strategy=fsdp requested with one process; using one device")
     return rank, local_rank, world_size, device
 
 
@@ -169,16 +170,43 @@ def _wrap_distributed(
     *,
     device: torch.device,
     world_size: int,
+    precision: str,
 ) -> nn.Module:
-    """单进程直接返回模型，多进程时使用一进程一卡的 DDP。"""
+    """单进程直接返回模型，多进程时按大模块切分成 FSDP shards。"""
 
     model.to(device)
     if world_size == 1:
         return model
-    return torch.nn.parallel.DistributedDataParallel(
+    from torch.distributed.fsdp import (
+        BackwardPrefetch,
+        FullyShardedDataParallel as FSDP,
+        MixedPrecision,
+    )
+    from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+
+    parameter_dtype = (
+        torch.bfloat16
+        if precision == "bf16"
+        else torch.float16
+        if precision == "fp16"
+        else torch.float32
+    )
+    return FSDP(
         model,
-        device_ids=[device.index] if device.type == "cuda" else None,
-        broadcast_buffers=False,
+        use_orig_params=True,
+        device_id=device,
+        auto_wrap_policy=partial(
+            size_based_auto_wrap_policy,
+            min_num_params=1_000_000,
+        ),
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+        limit_all_gathers=True,
+        sync_module_states=True,
+        mixed_precision=MixedPrecision(
+            param_dtype=parameter_dtype,
+            reduce_dtype=parameter_dtype,
+            buffer_dtype=parameter_dtype,
+        ),
     )
 
 
@@ -285,12 +313,19 @@ def _make_loaders(
             seed=seed,
             seed_clips=True,
         )
+        validation_sampler = torch.utils.data.distributed.DistributedSampler(
+            validation_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+        )
     else:
         sampler = ResumableSampler(
             len(train_dataset),
             seed=seed,
             seed_clips=True,
         )
+        validation_sampler = None
     workers = int(data.get("workers", 0))
     common = {
         "batch_size": batch_size,
@@ -307,6 +342,7 @@ def _make_loaders(
     )
     validation_loader = DataLoader(
         validation_dataset,
+        sampler=validation_sampler,
         shuffle=False,
         drop_last=False,
         **common,
@@ -342,6 +378,38 @@ def _to_device(batch: Mapping[str, object], device: torch.device) -> Dict[str, T
     return {
         name: batch[name].to(device, non_blocking=True)
         for name in MODEL_INPUT_NAMES
+    }
+
+
+def _action_variant_batches(batch: Mapping[str, Tensor]) -> Dict[str, Dict[str, Tensor]]:
+    """构造 FSDP-safe 动作诊断输入；每组都通过完整 model.forward。"""
+
+    def copied() -> Dict[str, Tensor]:
+        return {name: value.clone() for name, value in batch.items()}
+
+    action_names = tuple(name for name in MODEL_INPUT_NAMES if name != "frames")
+    shuffled = copied()
+    shuffle_dim = 0 if batch["frames"].shape[0] > 1 else 1
+    for name in action_names:
+        shuffled[name] = shuffled[name].roll(1, dims=shuffle_dim)
+
+    noop = copied()
+    for name in action_names:
+        if name != "valid_mask":
+            noop[name].zero_()
+
+    camera = copied()
+    camera["camera"].neg_()
+
+    swapped = copied()
+    attack = swapped["interaction"][..., 0].clone()
+    swapped["interaction"][..., 0] = swapped["interaction"][..., 1]
+    swapped["interaction"][..., 1] = attack
+    return {
+        "shuffled": shuffled,
+        "noop": noop,
+        "camera": camera,
+        "swapped": swapped,
     }
 
 
@@ -406,12 +474,13 @@ def _distributed_max(value: float, device: torch.device) -> float:
 
 @torch.no_grad()
 def validate(
-    model: WorldModel,
+    model: nn.Module,
     loader: DataLoader,
     *,
     device: torch.device,
     precision: str,
     batches: int,
+    spatial_grid: Tuple[int, int],
 ) -> Tuple[Dict[str, float], list]:
     """计算 validation prediction、collapse 与 action sensitivity 指标。"""
 
@@ -424,16 +493,33 @@ def validate(
         batch = _to_device(raw_batch, device)
         with _autocast_context(device, precision):
             output = model(**batch)
+            variant_predictions = (
+                {
+                    name: model(**variant)["teacher_forced_predictions"]
+                    for name, variant in _action_variant_batches(batch).items()
+                }
+                if batch_index == 0
+                else {}
+            )
         metrics = world_model_prediction_metrics(output)
         if batch_index == 0:
             metrics.update(
-                action_sensitivity_report(model, batch, latents=output["latents"])
+                action_sensitivity_from_predictions(
+                    output["teacher_forced_predictions"],
+                    variant_predictions["shuffled"],
+                    variant_predictions["noop"],
+                    variant_predictions["camera"],
+                    variant_predictions["swapped"],
+                    output["targets"],
+                    batch,
+                )
             )
-            images = spatial_error_images(
-                output["teacher_forced_predictions"],
-                output["targets"],
-                spatial_grid=model.predictor.config.spatial_grid,
-            )
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                images = spatial_error_images(
+                    output["teacher_forced_predictions"],
+                    output["targets"],
+                    spatial_grid=spatial_grid,
+                )
         for name, value in metrics.items():
             collected.setdefault(name, []).append(float(value))
     model.train()
@@ -443,6 +529,15 @@ def validate(
         name: sum(values) / len(values)
         for name, values in collected.items()
     }
+    if torch.distributed.is_initialized():
+        gathered = [None for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(gathered, metrics)
+        names = set().union(*(rank_metrics.keys() for rank_metrics in gathered))
+        metrics = {
+            name: sum(rank_metrics[name] for rank_metrics in gathered if name in rank_metrics)
+            / sum(name in rank_metrics for rank_metrics in gathered)
+            for name in names
+        }
     return metrics, images
 
 
@@ -455,7 +550,7 @@ def _prune_checkpoints(output_dir: Path, keep_last: int) -> None:
 def _save_distributed_checkpoint(
     path: Path,
     *,
-    model: WorldModel,
+    model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: Any,
     scaler: Any,
@@ -477,6 +572,24 @@ def _save_distributed_checkpoint(
         torch.distributed.all_gather_object(rng_by_rank, local_rng)
     else:
         rng_by_rank = [local_rng]
+    model_state = None
+    optimizer_state = None
+    if world_size > 1:
+        from torch.distributed.fsdp import (
+            FullOptimStateDictConfig,
+            FullStateDictConfig,
+            FullyShardedDataParallel as FSDP,
+            StateDictType,
+        )
+
+        with FSDP.state_dict_type(
+            model,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+            FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True),
+        ):
+            model_state = model.state_dict()
+            optimizer_state = FSDP.optim_state_dict(model, optimizer)
     if rank == 0:
         save_world_model_checkpoint(
             path,
@@ -494,9 +607,90 @@ def _save_distributed_checkpoint(
             rng_state=local_rng,
             rng_by_rank=rng_by_rank,
             world_size=world_size,
+            model_state_dict=model_state,
+            optimizer_state_dict=optimizer_state,
         )
     if world_size > 1:
         torch.distributed.barrier()
+
+
+def _load_distributed_checkpoint(
+    path: Path,
+    *,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    scaler: Any,
+    manifest_hash: str,
+    m1_parent_path: str,
+    m1_parent_hash: str,
+    rank: int,
+    world_size: int,
+) -> Dict[str, Any]:
+    """加载完整 M2 checkpoint，并把 optimizer state 重新切分给 FSDP ranks。"""
+
+    if world_size > 1:
+        from torch.distributed.fsdp import (
+            FullOptimStateDictConfig,
+            FullStateDictConfig,
+            FullyShardedDataParallel as FSDP,
+            StateDictType,
+        )
+
+        with FSDP.state_dict_type(
+            model,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=False),
+            FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=False),
+        ):
+            payload = load_world_model_checkpoint(
+                path,
+                model=model,
+                optimizer=None,
+                scheduler=None,
+                scaler=None,
+                expected_manifest_hash=manifest_hash,
+                expected_m1_parent_path=m1_parent_path,
+                expected_m1_parent_sha256=m1_parent_hash,
+                restore_rng=False,
+            )
+            optimizer_state = FSDP.optim_state_dict_to_load(
+                model,
+                optimizer,
+                payload["optimizer"],
+            )
+        optimizer.load_state_dict(optimizer_state)
+        if payload["scheduler"] is None:
+            raise ValueError("checkpoint does not contain scheduler state")
+        scheduler.load_state_dict(payload["scheduler"])
+        if scaler is not None:
+            if payload["scaler"] is None:
+                raise ValueError("checkpoint does not contain scaler state")
+            scaler.load_state_dict(payload["scaler"])
+    else:
+        payload = load_world_model_checkpoint(
+            path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            expected_manifest_hash=manifest_hash,
+            expected_m1_parent_path=m1_parent_path,
+            expected_m1_parent_sha256=m1_parent_hash,
+            restore_rng=False,
+        )
+
+    saved_world_size = int(payload["extra"].get("world_size", 1))
+    if saved_world_size != world_size:
+        raise ValueError(
+            "M2 FSDP resume requires the same world_size as the saved checkpoint"
+        )
+    rng_by_rank = payload["extra"].get("rng_by_rank")
+    if isinstance(rng_by_rank, list) and len(rng_by_rank) == world_size:
+        restore_rng_state(rng_by_rank[rank])
+    else:
+        restore_rng_state(payload["rng"])
+    return payload
 
 
 def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
@@ -538,12 +732,13 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
         m1_parent_hash = checkpoint_sha256(m1_path)
 
     base_model = build_world_model(config, visual_encoder)
-    trainable = list(base_model.trainable_parameters())
     model = _wrap_distributed(
         base_model,
         device=device,
         world_size=world_size,
+        precision=str(config["precision"]),
     )
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer_config = config["optimizer"]
     optimizer = torch.optim.AdamW(
         trainable,
@@ -570,35 +765,26 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     resume_path = config["checkpoint"].get("resume")
     resume_payload = None
     if resume_path:
-        resume_payload = load_world_model_checkpoint(
+        resume_payload = _load_distributed_checkpoint(
             Path(resume_path),
-            model=base_model,
+            model=model,
             optimizer=optimizer,
             scheduler=scheduler,
             scaler=scaler if use_scaler else None,
-            expected_manifest_hash=manifest_hash,
-            expected_m1_parent_path=m1_parent_path,
-            expected_m1_parent_sha256=m1_parent_hash,
-            restore_rng=False,
+            manifest_hash=manifest_hash,
+            m1_parent_path=m1_parent_path,
+            m1_parent_hash=m1_parent_hash,
+            rank=rank,
+            world_size=world_size,
         )
         saved_signature = _training_signature(
             resume_payload["provenance"]["config"]
         )
         if saved_signature != _training_signature(config):
             raise ValueError("resume changes M2 model/data/optimizer semantics")
-        saved_world_size = int(resume_payload["extra"].get("world_size", 1))
-        if saved_world_size != world_size:
-            raise ValueError(
-                "M2 DDP resume requires the same world_size as the saved checkpoint"
-            )
         optimizer_step = int(resume_payload["optimizer_step"])
         sampler_epoch = int(resume_payload["extra"]["sampler_epoch"])
         batch_offset = int(resume_payload["extra"]["batch_offset"])
-        rng_by_rank = resume_payload["extra"].get("rng_by_rank")
-        if isinstance(rng_by_rank, list) and len(rng_by_rank) == world_size:
-            restore_rng_state(rng_by_rank[rank])
-        else:
-            restore_rng_state(resume_payload["rng"])
 
     output_dir = Path(str(config["output_dir"]))
     if rank == 0:
@@ -660,10 +846,15 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
 
             if use_scaler:
                 scaler.unscale_(optimizer)
-            gradient_norm = torch.nn.utils.clip_grad_norm_(
-                trainable,
-                float(optimizer_config.get("gradient_clip", 1.0)),
-            )
+            if world_size > 1:
+                gradient_norm = model.clip_grad_norm_(
+                    float(optimizer_config.get("gradient_clip", 1.0))
+                )
+            else:
+                gradient_norm = torch.nn.utils.clip_grad_norm_(
+                    trainable,
+                    float(optimizer_config.get("gradient_clip", 1.0)),
+                )
             finite_step = torch.tensor(
                 int(torch.isfinite(gradient_norm)),
                 device=device,
@@ -723,14 +914,18 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
             if optimizer_step % int(config["validation"]["every_steps"]) == 0:
                 if world_size > 1:
                     torch.distributed.barrier()
+                validation_metrics, validation_images = validate(
+                    model,
+                    validation_loader,
+                    device=device,
+                    precision=str(config["precision"]),
+                    batches=int(config["validation"]["batches"]),
+                    spatial_grid=tuple(
+                        int(value)
+                        for value in config["model"]["predictor"]["spatial_grid"]
+                    ),
+                )
                 if rank == 0:
-                    validation_metrics, validation_images = validate(
-                        base_model,
-                        validation_loader,
-                        device=device,
-                        precision=str(config["precision"]),
-                        batches=int(config["validation"]["batches"]),
-                    )
                     logger.log(
                         validation_metrics,
                         step=optimizer_step,
@@ -746,7 +941,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                 last_checkpoint = output_dir / f"checkpoint-{optimizer_step:08d}.pt"
                 _save_distributed_checkpoint(
                     last_checkpoint,
-                    model=base_model,
+                    model=model,
                     optimizer=optimizer,
                     scheduler=scheduler,
                     scaler=scaler if use_scaler else None,
@@ -775,7 +970,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
         if not checkpoint_exists:
             _save_distributed_checkpoint(
                 final_checkpoint,
-                model=base_model,
+                model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 scaler=scaler if use_scaler else None,

@@ -325,7 +325,7 @@ Optimizer 只包含 Minecraft action encoder 和 AC predictor。M2 checkpoint �
 
 - 可验证的 M1 parent reference（不重复保存 frozen visual encoder 权重）
 - action encoder 和 AC predictor
-- optimizer、scheduler、scaler 和每个 DDP rank 的 RNG state
+- optimizer、scheduler、scaler 和每个 FSDP rank 的 RNG state
 - sampler epoch 和 epoch 内位置
 - 保存时的 world size；改变 GPU 进程数时拒绝直接 resume
 - optimizer step
@@ -334,10 +334,10 @@ Optimizer 只包含 Minecraft action encoder 和 AC predictor。M2 checkpoint �
 
 恢复时必须验证 M1 parent checkpoint 和 manifest，禁止将另一个 visual encoder 静默代入原 run。
 
-双卡正式训练使用一进程一卡 DDP。`data.batch_size` 表示每张 GPU 的 batch，
+双卡正式训练使用一进程一卡 FSDP。`data.batch_size` 表示每张 GPU 的 batch，
 `optimizer.effective_batch_size` 表示所有 GPU 合计的全局 batch。训练 sampler 在
-rank 间分片；梯度累积只在最后一个 micro-step 同步；验证、W&B 和 checkpoint
-只由 rank 0 执行。
+rank 间分片；模型参数、梯度和 optimizer state 由 FSDP 分片。梯度累积只在最后
+一个 micro-step 同步；验证指标跨 rank 汇总，W&B 和 checkpoint 只由 rank 0 写入。
 
 ## 9. B0 Smoke-Test Gate
 

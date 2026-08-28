@@ -266,6 +266,8 @@ def save_world_model_checkpoint(
     rng_state: Optional[Mapping[str, Any]] = None,
     rng_by_rank: Optional[Sequence[Mapping[str, Any]]] = None,
     world_size: int = 1,
+    model_state_dict: Optional[Mapping[str, Any]] = None,
+    optimizer_state_dict: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """保存 M2 权重和可验证的 M1 parent、sampler 续训状态。"""
 
@@ -273,9 +275,10 @@ def save_world_model_checkpoint(
         raise ValueError("M2 checkpoint requires an M1 parent path and SHA-256")
     if provenance.parent_checkpoint != m1_parent_path:
         raise ValueError("provenance.parent_checkpoint must identify the M1 checkpoint")
+    state = model_state_dict if model_state_dict is not None else model.state_dict()
     trainable_state = {
         name: value
-        for name, value in model.state_dict().items()
+        for name, value in state.items()
         if not name.startswith("visual_encoder.")
     }
     save_checkpoint(
@@ -287,6 +290,7 @@ def save_world_model_checkpoint(
         optimizer_step=optimizer_step,
         provenance=provenance,
         model_state_dict=trainable_state,
+        optimizer_state_dict=optimizer_state_dict,
         extra={
             "stage": "m2-world-model",
             "m1_parent_path": m1_parent_path,

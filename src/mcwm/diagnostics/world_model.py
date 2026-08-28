@@ -170,43 +170,20 @@ def _paired_gap_statistics(
 
 
 @torch.no_grad()
-def action_sensitivity_report(
-    model: WorldModel,
+def action_sensitivity_from_predictions(
+    real_prediction: Tensor,
+    shuffled_prediction: Tensor,
+    noop_prediction: Tensor,
+    camera_prediction: Tensor,
+    swap_prediction: Tensor,
+    targets: Tensor,
     batch: Mapping[str, Tensor],
-    *,
-    latents: Optional[Tensor] = None,
 ) -> Dict[str, float]:
-    """比较真实、打乱、no-op、反向 camera 和交换交互动作的误差。"""
+    """从五组预测计算动作敏感性，允许 FSDP 通过标准 forward 产生预测。"""
 
-    if latents is None:
-        latents = model.encode_frames(batch["frames"])
-    targets = latents[:, 1:]
-    real_inputs = _copy_action_inputs(batch)
-    real_tokens = model.encode_actions(**real_inputs)
-    real_prediction = model.predictor.predict_teacher_forced(
-        latents[:, :-1],
-        real_tokens,
-    )
     real_error = normalized_latent_l1_loss(real_prediction, targets)
-
-    if real_tokens.shape[0] > 1:
-        shuffled_tokens = real_tokens.roll(1, dims=0)
-    else:
-        shuffled_tokens = real_tokens.roll(1, dims=1)
-    shuffled_prediction = model.predictor.predict_teacher_forced(
-        latents[:, :-1],
-        shuffled_tokens,
-    )
     shuffled_error = normalized_latent_l1_loss(shuffled_prediction, targets)
-
-    noop_inputs = noop_action_inputs(batch)
-    noop_tokens = model.encode_actions(**noop_inputs)
-    noop_prediction = model.predictor.predict_teacher_forced(
-        latents[:, :-1],
-        noop_tokens,
-    )
     noop_error = normalized_latent_l1_loss(noop_prediction, targets)
-
     real_interval = _normalized_interval_error(real_prediction, targets)
     shuffled_interval = _normalized_interval_error(shuffled_prediction, targets)
     noop_interval = _normalized_interval_error(noop_prediction, targets)
@@ -219,22 +196,7 @@ def action_sensitivity_report(
         noop_interval,
     )
 
-    camera_inputs = _copy_action_inputs(batch)
-    camera_inputs["camera"].neg_()
-    camera_prediction = model.predictor.predict_teacher_forced(
-        latents[:, :-1],
-        model.encode_actions(**camera_inputs),
-    )
     camera_error = normalized_latent_l1_loss(camera_prediction, targets)
-
-    swap_inputs = _copy_action_inputs(batch)
-    attack = swap_inputs["interaction"][..., 0].clone()
-    swap_inputs["interaction"][..., 0] = swap_inputs["interaction"][..., 1]
-    swap_inputs["interaction"][..., 1] = attack
-    swap_prediction = model.predictor.predict_teacher_forced(
-        latents[:, :-1],
-        model.encode_actions(**swap_inputs),
-    )
     swap_error = normalized_latent_l1_loss(swap_prediction, targets)
 
     baseline = (shuffled_error + noop_error) / 2.0
@@ -273,3 +235,59 @@ def action_sensitivity_report(
         if bool(active.any()):
             metrics[f"action_bucket/{name}_l1"] = float(interval_error[active].mean())
     return metrics
+
+
+@torch.no_grad()
+def action_sensitivity_report(
+    model: WorldModel,
+    batch: Mapping[str, Tensor],
+    *,
+    latents: Optional[Tensor] = None,
+) -> Dict[str, float]:
+    """比较真实、打乱、no-op、反向 camera 和交换交互动作的误差。"""
+
+    if latents is None:
+        latents = model.encode_frames(batch["frames"])
+    targets = latents[:, 1:]
+    real_tokens = model.encode_actions(**_copy_action_inputs(batch))
+    real_prediction = model.predictor.predict_teacher_forced(
+        latents[:, :-1],
+        real_tokens,
+    )
+    shuffled_tokens = real_tokens.roll(
+        1,
+        dims=0 if real_tokens.shape[0] > 1 else 1,
+    )
+    shuffled_prediction = model.predictor.predict_teacher_forced(
+        latents[:, :-1],
+        shuffled_tokens,
+    )
+    noop_prediction = model.predictor.predict_teacher_forced(
+        latents[:, :-1],
+        model.encode_actions(**noop_action_inputs(batch)),
+    )
+
+    camera_inputs = _copy_action_inputs(batch)
+    camera_inputs["camera"].neg_()
+    camera_prediction = model.predictor.predict_teacher_forced(
+        latents[:, :-1],
+        model.encode_actions(**camera_inputs),
+    )
+
+    swap_inputs = _copy_action_inputs(batch)
+    attack = swap_inputs["interaction"][..., 0].clone()
+    swap_inputs["interaction"][..., 0] = swap_inputs["interaction"][..., 1]
+    swap_inputs["interaction"][..., 1] = attack
+    swap_prediction = model.predictor.predict_teacher_forced(
+        latents[:, :-1],
+        model.encode_actions(**swap_inputs),
+    )
+    return action_sensitivity_from_predictions(
+        real_prediction,
+        shuffled_prediction,
+        noop_prediction,
+        camera_prediction,
+        swap_prediction,
+        targets,
+        batch,
+    )
