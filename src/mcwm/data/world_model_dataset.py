@@ -235,12 +235,13 @@ class WorldModelDataset(Dataset):
 
         return len(self.references) * self.samples_per_video
 
-    def __getitem__(self, index: SampleIndex) -> Dict[str, object]:
-        """随机抽取一个合法 clip，并解码对应画面与动作。
+    def sample_action_clip(self, index: SampleIndex) -> Dict[str, object]:
+        """随机抽取 clip 的时间戳和动作块，但不解码视频。
 
         ``index`` 可以是普通整数，也可以是 ``(样本下标, 随机种子)``。后一种
         形式让 sampler 能显式控制随机性；相同 episode、参数和种子会选出相同
-        的帧下标。
+        的帧下标。这个轻量接口供数据审计使用，确保审计和训练采用完全相同的
+        clip 采样与动作聚合规则。
         """
 
         if isinstance(index, tuple):
@@ -260,23 +261,36 @@ class WorldModelDataset(Dataset):
             generator=random.Random(sample_seed),
         )
 
-        # 先按下标取时间戳，再分别读取对应画面并聚合帧间动作。两者使用同一组
-        # frame_indices，因此 frames[i]、timestamps[i] 和 action_blocks[i]
-        # 始终保持一致。
-        timestamps_ms = tuple(reference.frame_timestamps_ms[index] for index in frame_indices)
+        # 时间戳与动作使用同一组 frame_indices，因此 timestamps[i] 和
+        # action_blocks[i] 始终保持一致。
+        timestamps_ms = tuple(
+            reference.frame_timestamps_ms[index] for index in frame_indices
+        )
         action_blocks = _actions_between_sampled_frames(
             reference.aligned_blocks,
             frame_indices,
         )
-        frames = decode_frames_at_timestamps(reference.video_path, timestamps_ms)
         return {
-            "frames": frames,
-            "frame_timestamps_ms": torch.tensor(timestamps_ms, dtype=torch.int64),
+            "frame_timestamps_ms": timestamps_ms,
             "action_blocks": action_blocks,
             "sample_id": (
                 f"{reference.episode_id}:pts={timestamps_ms[0]}-{timestamps_ms[-1]}ms"
                 f"@{self.sample_fps}fps"
             ),
+            "video_path": reference.video_path,
+        }
+
+    def __getitem__(self, index: SampleIndex) -> Dict[str, object]:
+        """随机抽取一个合法 clip，并解码对应画面与动作。"""
+
+        metadata = self.sample_action_clip(index)
+        timestamps_ms = metadata["frame_timestamps_ms"]
+        frames = decode_frames_at_timestamps(metadata["video_path"], timestamps_ms)
+        return {
+            "frames": frames,
+            "frame_timestamps_ms": torch.tensor(timestamps_ms, dtype=torch.int64),
+            "action_blocks": metadata["action_blocks"],
+            "sample_id": metadata["sample_id"],
         }
 
 
