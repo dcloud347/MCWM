@@ -65,6 +65,29 @@ MODEL_INPUT_NAMES = (
 )
 
 
+def _progress_bar(completed: int, total: int, *, width: int = 24) -> str:
+    """生成和 M1 训练一致的固定宽度文本进度条。"""
+
+    if total <= 0:
+        return "[" + "-" * width + "]"
+    fraction = min(max(completed / total, 0.0), 1.0)
+    filled = min(width, int(fraction * width))
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def _format_duration(seconds: float) -> str:
+    """把秒数转换成简短、易读的时间。"""
+
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{seconds:02d}s"
+    if minutes:
+        return f"{minutes:d}m{seconds:02d}s"
+    return f"{seconds:d}s"
+
+
 class SyntheticWorldModelDataset(Dataset):
     """生成有动作关联的确定性小样本，只用于 M2 smoke test。"""
 
@@ -481,12 +504,29 @@ def validate(
     precision: str,
     batches: int,
     spatial_grid: Tuple[int, int],
+    progress_label: str = "validation",
 ) -> Tuple[Dict[str, float], list]:
     """计算 validation prediction、collapse 与 action sensitivity 指标。"""
 
     model.eval()
     collected: Dict[str, list] = {}
     images = []
+    validation_rank = (
+        torch.distributed.get_rank()
+        if torch.distributed.is_initialized()
+        else 0
+    )
+    try:
+        total_batches = min(batches, len(loader))
+    except TypeError:
+        total_batches = batches
+    progress_every = max(1, total_batches // 10)
+    if validation_rank == 0:
+        print(
+            f"[{progress_label}] {_progress_bar(0, total_batches)} "
+            f"0/{total_batches}",
+            flush=True,
+        )
     for batch_index, raw_batch in enumerate(loader):
         if batch_index >= batches:
             break
@@ -522,6 +562,17 @@ def validate(
                 )
         for name, value in metrics.items():
             collected.setdefault(name, []).append(float(value))
+        completed_batches = batch_index + 1
+        if validation_rank == 0 and (
+            completed_batches % progress_every == 0
+            or completed_batches == total_batches
+        ):
+            print(
+                f"[{progress_label}] "
+                f"{_progress_bar(completed_batches, total_batches)} "
+                f"{completed_batches}/{total_batches}",
+                flush=True,
+            )
     model.train()
     if not collected:
         raise ValueError("validation loader produced no batches")
@@ -817,6 +868,14 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     )
     model.train()
     last_checkpoint = output_dir / f"checkpoint-{optimizer_step:08d}.pt"
+    training_started = time.perf_counter()
+    starting_optimizer_step = optimizer_step
+    if rank == 0:
+        print(
+            f"[train] {_progress_bar(optimizer_step, total_steps)} "
+            f"{optimizer_step}/{total_steps}",
+            flush=True,
+        )
     try:
         while optimizer_step < total_steps:
             step_started = time.perf_counter()
@@ -891,26 +950,46 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                     accumulated["autoregressive"] / accumulation_steps,
                     device,
                 )
-                logger.log(
-                    {
-                        "train/loss": train_loss,
-                        "train/teacher_forced_loss": teacher_loss,
-                        "train/autoregressive_loss": autoregressive_loss,
-                        "train/gradient_norm": float(gradient_norm),
-                        "train/learning_rate": scheduler.get_last_lr()[0],
-                        "system/step_seconds": step_seconds,
-                        "system/samples_per_second": effective_batch
-                        / max(step_seconds, 1e-9),
-                        "system/world_size": world_size,
-                        "system/accumulation_steps": accumulation_steps,
-                        "system/max_memory_gib": (
-                            torch.cuda.max_memory_allocated(device) / 2**30
-                            if device.type == "cuda"
-                            else 0.0
-                        ),
-                    },
-                    step=optimizer_step,
-                )
+                metrics = {
+                    "train/loss": train_loss,
+                    "train/teacher_forced_loss": teacher_loss,
+                    "train/autoregressive_loss": autoregressive_loss,
+                    "train/gradient_norm": float(gradient_norm),
+                    "train/learning_rate": scheduler.get_last_lr()[0],
+                    "system/step_seconds": step_seconds,
+                    "system/samples_per_second": effective_batch
+                    / max(step_seconds, 1e-9),
+                    "system/world_size": world_size,
+                    "system/accumulation_steps": accumulation_steps,
+                    "system/max_memory_gib": (
+                        torch.cuda.max_memory_allocated(device) / 2**30
+                        if device.type == "cuda"
+                        else 0.0
+                    ),
+                }
+                logger.log(metrics, step=optimizer_step)
+                if rank == 0:
+                    completed_this_run = (
+                        optimizer_step - starting_optimizer_step
+                    )
+                    average_step_seconds = (
+                        time.perf_counter() - training_started
+                    ) / completed_this_run
+                    eta_seconds = (
+                        total_steps - optimizer_step
+                    ) * average_step_seconds
+                    percentage = 100.0 * optimizer_step / total_steps
+                    print(
+                        f"[train] {_progress_bar(optimizer_step, total_steps)} "
+                        f"{optimizer_step}/{total_steps} ({percentage:5.1f}%) "
+                        f"loss={train_loss:.5f} "
+                        f"tf={teacher_loss:.5f} "
+                        f"ar={autoregressive_loss:.5f} "
+                        f"step={step_seconds:.2f}s "
+                        f"samples/s={metrics['system/samples_per_second']:.2f} "
+                        f"eta={_format_duration(eta_seconds)}",
+                        flush=True,
+                    )
             if optimizer_step % int(config["validation"]["every_steps"]) == 0:
                 if world_size > 1:
                     torch.distributed.barrier()
@@ -924,6 +1003,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                         int(value)
                         for value in config["model"]["predictor"]["spatial_grid"]
                     ),
+                    progress_label=f"validation step {optimizer_step}",
                 )
                 if rank == 0:
                     logger.log(
