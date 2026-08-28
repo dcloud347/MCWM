@@ -87,9 +87,16 @@ class WorldModelDatasetTest(unittest.TestCase):
                         for action in block
                     )
                 )
+            self.assertEqual(
+                sample["sample_id"],
+                f"episode:pts={frame_times[0]}-{frame_times[-1]}ms@4fps",
+            )
 
     def test_collate_pads_variable_ticks_without_turning_padding_into_noop(self):
-        first_blocks = tuple(((_action(index * 100),)) for index in range(7))
+        first_blocks = tuple(
+            ((CanonicalActionTick.noop(index * 100, ActionSource.VPT),))
+            for index in range(7)
+        )
         second_blocks = tuple(
             (
                 _action(index * 100),
@@ -115,6 +122,7 @@ class WorldModelDatasetTest(unittest.TestCase):
         batch = collate_world_model_samples(samples)
 
         self.assertEqual(tuple(batch["movement"].shape), (2, 7, 2, 7))
+        self.assertFalse(batch["movement"][0].any())
         self.assertTrue(batch["valid_mask"][0, :, 0].all())
         self.assertFalse(batch["valid_mask"][0, :, 1].any())
         self.assertTrue(batch["valid_mask"][1].all())
@@ -130,6 +138,15 @@ class WorldModelDatasetTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "invalid action labels"):
             _actions_between_sampled_frames(blocks, (0, 1))
+
+    def test_rejects_transition_across_discontinuity(self):
+        blocks = (
+            ActionBlock(0, 0, 50, (_action(0),), True),
+            ActionBlock(1, 50, 500, (_action(50),), False),
+        )
+
+        with self.assertRaisesRegex(ValueError, "discontinuity"):
+            _actions_between_sampled_frames(blocks, (0, 2))
 
     def test_rejects_non_vpt_training_episodes(self):
         with tempfile.TemporaryDirectory() as temporary:

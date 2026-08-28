@@ -264,7 +264,7 @@ class WorldModelDataset(Dataset):
             "frame_timestamps_ms": torch.tensor(timestamps_ms, dtype=torch.int64),
             "action_blocks": action_blocks,
             "sample_id": (
-                f"{reference.episode_id}:{frame_indices[0]}-{frame_indices[-1] + 1}"
+                f"{reference.episode_id}:pts={timestamps_ms[0]}-{timestamps_ms[-1]}ms"
                 f"@{self.sample_fps}fps"
             ),
         }

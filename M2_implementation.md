@@ -163,6 +163,8 @@ PYTHONPATH=src python3 scripts/probe_m2_encoder.py \
 
 ## 3. M2 Dataset
 
+**实现状态：已完成。**
+
 新增 `src/mcwm/data/world_model_dataset.py`：
 
 - `WorldModelDataset`：按 PTS 选取 8 帧连续画面和 7 个 action blocks。
@@ -181,6 +183,8 @@ sample_id:     episode and PTS range
 测试覆盖 frame/action off-by-one、左闭右开边界、discontinuity、变长 `K`、valid no-op 与 padding，以及基于真实 PTS 的 4 FPS 采样。
 
 ## 4. Minecraft Action Encoder
+
+**实现状态：已完成。**
 
 新增 `src/mcwm/models/action_encoder.py`。官方 V-JEPA 2-AC 用 linear layer 编码 7 维 robot action；Minecraft action block 是变长、混合类型序列，因此替换为：
 
