@@ -157,6 +157,7 @@ def audit_world_model_dataset(
 def audit_from_config(
     config: Mapping[str, Any],
     *,
+    root: Optional[Path] = None,
     split: Optional[str] = None,
     sampling_epochs: int = 1,
     max_clips: Optional[int] = None,
@@ -164,9 +165,10 @@ def audit_from_config(
     """构建与 M2 配置一致的数据集并统计动作覆盖率。"""
 
     data = config["data"]
+    resolved_root = Path(root) if root is not None else Path(data["root"])
     resolved_split = str(split or data.get("train_split", "train"))
     dataset = WorldModelDataset(
-        Path(data["root"]),
+        resolved_root,
         split=resolved_split,
         frames_per_sample=int(data["frames_per_sample"]),
         sample_fps=int(data["sample_fps"]),
@@ -179,7 +181,7 @@ def audit_from_config(
         sampling_epochs=sampling_epochs,
         max_clips=max_clips,
     )
-    report["root"] = str(Path(data["root"]))
+    report["root"] = str(resolved_root)
     report["split"] = resolved_split
     return report
 
@@ -238,6 +240,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--root", type=Path, help="Override data.root from config")
     parser.add_argument("--split")
     parser.add_argument("--sampling-epochs", type=int, default=1)
     parser.add_argument("--max-clips", type=int)
@@ -251,6 +254,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     validate_world_model_config(config)
     report = audit_from_config(
         config,
+        root=args.root,
         split=args.split,
         sampling_epochs=args.sampling_epochs,
         max_clips=args.max_clips,
