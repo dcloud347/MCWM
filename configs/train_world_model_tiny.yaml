@@ -48,6 +48,7 @@ model:
     context_blocks: 8
     spatial_grid: [2, 2]
     dropout: 0.0
+    gradient_checkpointing: false
 optimizer:
   learning_rate: 0.001
   weight_decay: 0.0

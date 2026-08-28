@@ -9,6 +9,7 @@ from typing import Dict, Tuple
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .layers import _apply_3d_rope
 
@@ -26,6 +27,7 @@ class ACPredictorConfig:
     context_blocks: int = 16
     spatial_grid: Tuple[int, int] = (18, 32)
     dropout: float = 0.1
+    gradient_checkpointing: bool = True
 
     def __post_init__(self) -> None:
         dimensions = (
@@ -259,12 +261,27 @@ class ActionConditionedPredictor(nn.Module):
         rows, columns = self.config.spatial_grid
         rope_grid_size = (block_count, rows, columns)
         for block in self.blocks:
-            tokens = block(
-                tokens,
-                position_ids,
-                attention_mask,
-                rope_grid_size,
-            )
+            if (
+                self.config.gradient_checkpointing
+                and self.training
+                and torch.is_grad_enabled()
+            ):
+                # 不保存本 block 的中间激活；反向传播时重新执行一次 block。
+                tokens = checkpoint(
+                    block,
+                    tokens,
+                    position_ids,
+                    attention_mask,
+                    rope_grid_size,
+                    use_reentrant=False,
+                )
+            else:
+                tokens = block(
+                    tokens,
+                    position_ids,
+                    attention_mask,
+                    rope_grid_size,
+                )
 
         tokens = self.norm(tokens)
         tokens = tokens.reshape(

@@ -3,6 +3,8 @@ from unittest.mock import patch
 
 try:
     import torch
+    from torch.utils.checkpoint import checkpoint as torch_checkpoint
+
     from mcwm.models.ac_predictor import (
         ACPredictorConfig,
         ActionConditionedPredictor,
@@ -14,7 +16,7 @@ except ModuleNotFoundError:
     torch = None
 
 
-def _config():
+def _config(*, gradient_checkpointing=False):
     return ACPredictorConfig(
         latent_dim=12,
         action_dim=12,
@@ -25,11 +27,28 @@ def _config():
         context_blocks=4,
         spatial_grid=(2, 2),
         dropout=0.0,
+        gradient_checkpointing=gradient_checkpointing,
     )
 
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
 class FrameBlockCausalPredictorTest(unittest.TestCase):
+    def test_training_checkpoints_each_transformer_block(self):
+        model = ActionConditionedPredictor(
+            _config(gradient_checkpointing=True)
+        ).train()
+        latents = torch.randn(1, 2, 4, 12)
+        actions = torch.randn(1, 2, 12)
+
+        with patch(
+            "mcwm.models.ac_predictor.checkpoint",
+            wraps=torch_checkpoint,
+        ) as checkpoint_mock:
+            prediction = model.predict_teacher_forced(latents, actions)
+            prediction.sum().backward()
+
+        self.assertEqual(checkpoint_mock.call_count, model.config.depth)
+
     def test_mask_allows_same_and_past_blocks_only(self):
         mask = block_causal_attention_mask(
             blocks=3,

@@ -285,6 +285,7 @@ def ac_predictor_config(config: Mapping[str, Any]) -> ACPredictorConfig:
         context_blocks=int(value.get("context_blocks", 16)),
         spatial_grid=(int(grid[0]), int(grid[1])),
         dropout=float(value.get("dropout", 0.1)),
+        gradient_checkpointing=bool(value.get("gradient_checkpointing", True)),
     )
 
 

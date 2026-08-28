@@ -318,6 +318,7 @@ Predictor 是一个 causal Transformer，从随机初始化开始训练：
 | output dim | 1024 |
 | dropout | 0.1 |
 | conditioning | action-token interleaving |
+| gradient checkpointing | 正式训练逐 Transformer block 启用 |
 | 参数量 | 约 305M |
 
 输入为 observation latent history 和 action-block embeddings。每个时间点排列为 `[action token, 576 visual tokens]`；同一 block 内完全互相可见，当前 block 可以看到过去 block，但不能看到未来 block。位置编码使用 3D RoPE。
@@ -331,6 +332,9 @@ output:  zhat_1 ... zhat_T
 ```
 
 推理 rollout 时使用滑动 context，把预测 latent 作为后续输入。实现中必须分别测试 teacher-forced path 和 autoregressive path，防止只在训练路径正确。
+
+M2 正式训练默认对 Predictor 的每个 Transformer block 使用 activation checkpointing，
+在反向传播时重算该层激活以降低显存峰值；验证与推理不启用。
 
 ### 5.5 参数预算
 

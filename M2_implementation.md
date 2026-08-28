@@ -222,6 +222,7 @@ A_t: variable ticks -> ActionEncoder -> a_t[1024]
 | action tokens per transition | 1 |
 | attention | frame/block causal |
 | positional encoding | 3D RoPE |
+| gradient checkpointing | 正式训练启用，逐 Transformer block |
 
 先将 visual tokens 和 action embedding 投影到 predictor dim，再按 frame block 排列：
 
@@ -249,6 +250,10 @@ target: next latents[B, 7, 576, 1024]
 predict_teacher_forced(latents, actions)
 rollout(initial_latent, actions)
 ```
+
+正式训练在每个 Predictor Transformer block 上启用 activation checkpointing：
+前向时不保留 block 的中间激活，反向时重新计算，以增加计算量换取更低显存。
+验证和推理不会触发该逻辑；配置为 `false` 可关闭，但会占用更多显存。
 
 测试覆盖 causal leakage、block 内通信、输出 token 过滤、teacher-forced 语义，以及 rollout 确实反馈 predicted latent。
 
