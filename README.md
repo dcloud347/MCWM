@@ -123,7 +123,8 @@ Audit how many clips sampled by the M2 training configuration contain actions:
 
 ```bash
 PYTHONPATH=src python3 scripts/audit_world_model_clips.py \
-  --config configs/train_world_model_2xh100_sxm.yaml \
+  --config configs/train_world_model_3xh100_sxm.yaml \
+  --root /workspace/datasets/MCWM/canonical \
   --sampling-epochs 5 \
   --output artifacts/world_model_clip_action_audit.json
 ```

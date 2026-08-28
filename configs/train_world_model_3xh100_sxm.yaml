@@ -64,19 +64,19 @@ optimizer:
   # 16 samples/GPU x 3 GPUs x 1 micro-step = 48，因此不需要梯度累积。
   effective_batch_size: 48
   iterations_per_epoch: 200
-  epochs: 60
-  # 前约 300 个 optimizer steps 线性增大学习率，之后进入 cosine 衰减阶段。
-  warmup_steps: 300
+  epochs: 40
+  # 前约 200 个 optimizer steps 线性增大学习率，之后进入 cosine 衰减阶段。
+  warmup_steps: 200
 
 validation:
   # 三个 rank 分片验证；每 1,200 optimizer steps 各自最多处理 64 个 batches。
   # 指标会跨 rank 汇总，只有 rank 0 写日志和诊断图片。
-  every_steps: 800
+  every_steps: 400
   batches: 64
 
 checkpoint:
   # 只有 rank 0 写文件；checkpoint 保存三张卡各自的 RNG 和统一 sampler 位置。
-  every_steps: 800
+  every_steps: 400
   keep_last: 3
   resume: null
 
