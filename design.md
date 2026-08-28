@@ -697,6 +697,7 @@ MCWM/
 - frame/action off-by-one 测试。
 - 时间断点不会跨越采样测试。
 - no-op 被保留、padding 与 no-op 可区分。
+- 连续 interval 没有 action tick 时生成有效 no-op，而不是 padding。
 - GUI cursor 合成位置测试。
 - session/world split 无泄漏测试。
 
@@ -772,7 +773,7 @@ MCWM/
 | 风险 | 表现 | 应对 |
 |---|---|---|
 | VPT 数据对齐错误 | 模型看似不使用动作 | PTS 对齐、overlay 抽检、off-by-one fixture |
-| no-op 被删除 | 惯性和被动动态学错 | 保留真实 no-op，只过滤损坏 transition |
+| no-op 被删除 | 惯性和被动动态学错 | 保留真实 no-op；连续空 interval 合成有效 no-op，只过滤损坏 transition |
 | 动作空间过度简化 | 无法学习 use/hotbar/GUI | 完整 canonical schema + micro-action encoder |
 | latent collapse | std/rank 降低 | frozen EMA target space + rank/std 硬报警 |
 | predictor 忽略动作 | shuffled action 误差不变 | action sensitivity gate，必要时自训练 IDM head |

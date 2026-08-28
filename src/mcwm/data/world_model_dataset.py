@@ -92,7 +92,8 @@ def _actions_between_sampled_frames(
 
     * 采样帧下标必须严格递增；
     * 中间所有原始帧区间必须连续；
-    * 每个采样帧区间至少有一个有效的 VPT 动作标签。
+    * 已存在的动作 tick 必须是有效的 VPT 标签；完全没有 tick 的连续区间会
+      生成一个有效 no-op，让模型学习“玩家没有输入”时的状态变化。
     """
 
     result = []
@@ -116,7 +117,16 @@ def _actions_between_sampled_frames(
             for action in block.actions
         )
         if not actions:
-            raise ValueError("sampled transition has no action labels")
+            # VPT 动作表示当前输入状态，因此连续区间里完全没有记录时按真实
+            # no-op 处理。它必须是 valid=True；valid=False 只保留给 batch
+            # padding，Action Encoder 才能区分“没有操作”和“没有数据”。
+            actions = (
+                CanonicalActionTick.noop(
+                    source_blocks[0].start_ms,
+                    ActionSource.VPT,
+                    valid=True,
+                ),
+            )
         if not all(action.valid for action in actions):
             raise ValueError("sampled transition contains invalid action labels")
         if not all(action.source is ActionSource.VPT for action in actions):

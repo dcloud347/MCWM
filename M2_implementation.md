@@ -91,7 +91,9 @@ gui_open:       bool[B, 7, Kmax]
 valid_mask:     bool[B, 7, Kmax]
 ```
 
-`valid_mask=false` 只表示 padding，不能表示真实 no-op。缺失标签的 interval 不能被静默转换为 no-op。
+`valid_mask=false` 只表示 padding，不能表示真实 no-op。连续 interval 内完全没有
+action tick 时生成一个 `valid=true` 的 no-op tick；已有但无效的标签以及跨越
+discontinuity 的 interval 仍然拒绝。
 
 ## 2. Frozen M1 EMA Visual Encoder
 

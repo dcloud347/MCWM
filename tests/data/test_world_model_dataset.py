@@ -139,6 +139,33 @@ class WorldModelDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid action labels"):
             _actions_between_sampled_frames(blocks, (0, 1))
 
+    def test_empty_transition_becomes_a_valid_noop(self):
+        blocks = (
+            ActionBlock(0, 100, 150, (), True),
+            ActionBlock(1, 150, 200, (), True),
+        )
+
+        (actions,) = _actions_between_sampled_frames(blocks, (0, 2))
+
+        self.assertEqual(len(actions), 1)
+        self.assertTrue(actions[0].is_noop)
+        self.assertTrue(actions[0].valid)
+        self.assertEqual(actions[0].timestamp_ms, 100)
+        self.assertIs(actions[0].source, ActionSource.VPT)
+
+        batch = collate_world_model_samples(
+            [
+                {
+                    "frames": torch.zeros(2, 3, 4, 4, dtype=torch.uint8),
+                    "frame_timestamps_ms": torch.tensor([100, 200]),
+                    "action_blocks": (actions,),
+                    "sample_id": "empty-to-noop",
+                }
+            ]
+        )
+        self.assertTrue(batch["valid_mask"][0, 0, 0])
+        self.assertEqual(float(batch["label_confidence"][0, 0, 0]), 1.0)
+
     def test_rejects_transition_across_discontinuity(self):
         blocks = (
             ActionBlock(0, 0, 50, (_action(0),), True),
