@@ -24,8 +24,8 @@ data:
   workers: 8
 
 model:
-  # 从真实首帧开始，连续反馈模型自己的预测结果 6 步，约为 1.5 秒。
-  auto_steps: 6
+  # 从真实首帧开始，连续反馈模型自己的预测结果 4 步，约为 1 秒。
+  auto_steps: 4
   # 每张卡本地 batch 共 16 x 12 = 192 帧；chunk size 192 可一次处理完整 batch。
   encoder_frame_chunk_size: 192
 

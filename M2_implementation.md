@@ -278,7 +278,7 @@ zhat_1 + A_1 -> zhat_2
 zhat_2 + A_2 -> zhat_3
 ```
 
-首个正式配置对齐官方 released config，使用 `auto_steps=2`。预测和 target 按最后一维做 LayerNorm，默认使用 L1：
+正式配置使用 `auto_steps=4`，在训练吞吐和多步 rollout 监督之间取平衡。预测和 target 按最后一维做 LayerNorm，默认使用 L1：
 
 ```text
 L_tf = mean(abs(normalize(zhat_tf) - normalize(z_target_tf)))
@@ -432,7 +432,7 @@ tests/training/
 3. Minecraft action encoder 及单元测试。
 4. Action-token block-causal mask 和 AC predictor。
 5. Teacher-forced path 和 normalized latent L1 loss。
-6. Autoregressive rollout path 和 `auto_steps=2`。
+6. Autoregressive rollout path 和正式配置的 `auto_steps=4`。
 7. WorldModel 组合层和 frozen-encoder chunked encoding。
 8. Checkpoint、resume、W&B 和本地 JSONL logging。
 9. Tiny synthetic B0 和 canonical fixture B0。

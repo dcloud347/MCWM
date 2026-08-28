@@ -91,7 +91,7 @@ L_ar = mean(abs(normalize(ẑ_ar) - normalize(z_target)))
 L_wm = L_tf + L_ar
 ```
 
-正式首版使用 `auto_steps=2`。SIGReg、IDM 和 pixel reconstruction 都不是 M2 默认 loss；若启用，必须作为独立扩展实验。
+正式配置使用 `auto_steps=4`，在训练吞吐和多步 rollout 监督之间取平衡。SIGReg、IDM 和 pixel reconstruction 都不是 M2 默认 loss；若启用，必须作为独立扩展实验。
 
 ### 3.3 所有权重都必须由 MCWM 训练产生
 
@@ -449,10 +449,10 @@ M2 checkpoint 只保存可训练的 action encoder 和 predictor，并用 path/h
 
 ### 6.4 阶段 B2：多步 rollout training
 
-M2 正式配置训练 6-step rollout，并保留较短 horizon 指标。后续 M3 可继续加入 8 步及更长 open-loop rollout；它仍归入 prediction loss，不增加新的 loss 家族：
+M2 正式配置训练 4-step rollout，并保留较短 horizon 指标。后续 M3 可继续加入 6、8 步及更长 open-loop rollout；它仍归入 prediction loss，不增加新的 loss 家族：
 
 ```text
-L_auto = (1/6) Σ_h=1..6 ‖LN(ẑ(t+h)) − LN(z_target(t+h))‖₁
+L_auto = (1/4) Σ_h=1..4 ‖LN(ẑ(t+h)) − LN(z_target(t+h))‖₁
 L_pred = L_teacher + L_auto
 ```
 
