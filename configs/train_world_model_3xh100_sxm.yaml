@@ -65,8 +65,8 @@ optimizer:
   effective_batch_size: 48
   iterations_per_epoch: 200
   epochs: 40
-  # 前约 200 个 optimizer steps 线性增大学习率，之后进入 cosine 衰减阶段。
-  warmup_steps: 200
+  # 前约 400 个 optimizer steps 线性增大学习率，之后进入 cosine 衰减阶段。
+  warmup_steps: 400
 
 validation:
   # 三个 rank 分片验证；每 1,200 optimizer steps 各自最多处理 64 个 batches。
