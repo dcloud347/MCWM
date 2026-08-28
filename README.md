@@ -119,6 +119,19 @@ PYTHONPATH=src torchrun --standalone --nproc-per-node=2 \
 For this FSDP configuration, `data.batch_size` is per GPU and
 `optimizer.effective_batch_size` is global across both GPUs.
 
+Audit how many clips sampled by the M2 training configuration contain actions:
+
+```bash
+PYTHONPATH=src python3 scripts/audit_world_model_clips.py \
+  --config configs/train_world_model_2xh100_sxm.yaml \
+  --sampling-epochs 5 \
+  --output artifacts/world_model_clip_action_audit.json
+```
+
+The audit follows the training sampler and action alignment but skips video
+decoding. It reports action coverage at clip, transition, and raw-tick levels,
+plus movement, interaction, camera, hotbar, GUI, and cursor categories.
+
 Tiny configurations are only for tests and local smoke checks. Their outputs
 are not valid formal M1 or M2 checkpoints.
 
