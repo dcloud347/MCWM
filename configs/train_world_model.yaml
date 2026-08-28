@@ -149,8 +149,8 @@ validation:
   # 每 1,200 个 optimizer steps 运行一次验证。
   every_steps: 1200
 
-  # 每次验证最多计算 16 个 validation batches；更多样本能让指标更加稳定。
-  batches: 16
+  # 每次验证最多计算 64 个 validation batches；更多样本能让指标更加稳定。
+  batches: 64
 
 checkpoint:
   # 每 1,200 个 optimizer steps 保存一次 M2 checkpoint。
