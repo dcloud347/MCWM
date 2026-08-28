@@ -952,6 +952,8 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                 )
                 metrics = {
                     "train/loss": train_loss,
+                    "train/epoch": optimizer_step
+                    / int(optimizer_config["iterations_per_epoch"]),
                     "train/teacher_forced_loss": teacher_loss,
                     "train/autoregressive_loss": autoregressive_loss,
                     "train/gradient_norm": float(gradient_norm),
