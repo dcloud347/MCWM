@@ -58,7 +58,7 @@ model:
     gradient_checkpointing: true
 
 optimizer:
-  learning_rate: 0.0002
+  learning_rate: 0.00015
   weight_decay: 0.05
   gradient_clip: 1.0
   # 16 samples/GPU x 3 GPUs x 1 micro-step = 48，因此不需要梯度累积。
