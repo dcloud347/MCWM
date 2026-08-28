@@ -124,7 +124,7 @@ model:
 
 optimizer:
   # AdamW 的初始最大学习率；warmup 后会按 cosine 曲线逐渐下降。
-  learning_rate: 0.0001
+  learning_rate: 0.0002
 
   # AdamW 权重衰减，用于约束可训练参数规模。
   weight_decay: 0.05
