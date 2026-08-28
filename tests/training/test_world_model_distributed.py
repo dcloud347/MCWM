@@ -11,6 +11,7 @@ try:
     )
     from mcwm.training.train_world_model import (
         _accumulation_steps,
+        _adamw_parameter_groups,
         _format_duration,
         _make_loaders,
         _progress_bar,
@@ -60,6 +61,26 @@ class WorldModelDistributedTest(unittest.TestCase):
         config["optimizer"]["effective_batch_size"] = 48
         with self.assertRaisesRegex(ValueError, "world_size"):
             _accumulation_steps(config, world_size=2)
+
+    def test_adamw_excludes_bias_and_one_dimensional_parameters_from_decay(self):
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 8),
+            torch.nn.LayerNorm(8),
+            torch.nn.Linear(8, 2, bias=False),
+        )
+        model[2].weight.requires_grad_(False)
+
+        decay, no_decay = _adamw_parameter_groups(model)
+        decay_ids = {id(parameter) for parameter in decay["params"]}
+        no_decay_ids = {id(parameter) for parameter in no_decay["params"]}
+
+        self.assertEqual(decay_ids, {id(model[0].weight)})
+        self.assertEqual(
+            no_decay_ids,
+            {id(model[0].bias), id(model[1].weight), id(model[1].bias)},
+        )
+        self.assertEqual(no_decay["weight_decay"], 0.0)
+        self.assertNotIn(id(model[2].weight), decay_ids | no_decay_ids)
 
     def test_distributed_samplers_assign_different_examples(self):
         rank_zero, _, _ = _make_loaders(

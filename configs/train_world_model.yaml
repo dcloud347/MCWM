@@ -116,8 +116,8 @@ model:
     # 该形状必须与 M1 patch 划分得到的 token 网格一致。
     spatial_grid: [18, 32]
 
-    # Predictor 内 attention 和 FFN 使用的 dropout。
-    dropout: 0.1
+    # 对齐 V-JEPA 2-AC，不在 autoregressive predictor 中注入 dropout 噪声。
+    dropout: 0.0
 
     # true 会在反向传播时逐层重算 Predictor block，以增加计算换取更低显存。
     gradient_checkpointing: true
@@ -126,8 +126,8 @@ optimizer:
   # AdamW 的初始最大学习率；warmup 后会按 cosine 曲线逐渐下降。
   learning_rate: 0.0002
 
-  # AdamW 权重衰减，用于约束可训练参数规模。
-  weight_decay: 0.05
+  # 对齐 V-JEPA 2-AC：矩阵权重使用 0.04；bias 和一维参数由代码设为 0。
+  weight_decay: 0.04
 
   # 反向传播后按全局梯度范数裁剪，避免偶发梯度爆炸。
   gradient_clip: 1.0

@@ -11,7 +11,8 @@ M2 以官方 V-JEPA 2-AC 为主线：
 3. 保留每帧的全部 spatial tokens，不做 mean pooling。
 4. 使用 frame/block-causal Transformer，通过 action token 条件化下一帧 latent prediction。
 5. 同时训练 teacher-forced prediction 和 autoregressive rollout prediction。
-6. 默认损失对齐官方 V-JEPA 2-AC，使用 normalized latent L1 loss。
+6. 默认损失对齐官方 V-JEPA 2-AC：先归一化冻结 encoder latent，每一步预测
+   归一化后再回灌，并使用 normalized latent L1 loss。
 
 Minecraft 的必要适配：
 

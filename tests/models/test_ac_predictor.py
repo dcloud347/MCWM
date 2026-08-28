@@ -33,6 +33,9 @@ def _config(*, gradient_checkpointing=False):
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
 class FrameBlockCausalPredictorTest(unittest.TestCase):
+    def test_default_predictor_disables_dropout(self):
+        self.assertEqual(ACPredictorConfig().dropout, 0.0)
+
     def test_training_checkpoints_each_transformer_block(self):
         model = ActionConditionedPredictor(
             _config(gradient_checkpointing=True)
@@ -103,7 +106,7 @@ class FrameBlockCausalPredictorTest(unittest.TestCase):
         initial = torch.zeros(1, 4, 12)
         actions = torch.stack(
             (
-                torch.ones(1, 12),
+                torch.arange(12, dtype=torch.float32).unsqueeze(0),
                 torch.full((1, 12), 2.0),
             ),
             dim=1,
@@ -121,9 +124,13 @@ class FrameBlockCausalPredictorTest(unittest.TestCase):
         ):
             prediction = model.rollout(initial, actions)
 
-        self.assertTrue(torch.equal(prediction[:, 0], torch.ones(1, 4, 12)))
-        self.assertTrue(torch.equal(prediction[:, 1], torch.full((1, 4, 12), 3.0)))
-        self.assertTrue(torch.equal(seen_latents[1][:, -1], prediction[:, 0]))
+        first = actions[:, 0].unsqueeze(1).expand(-1, 4, -1)
+        normalized_first = torch.nn.functional.layer_norm(first, (12,))
+        self.assertTrue(torch.equal(prediction[:, 0], first))
+        self.assertTrue(torch.allclose(seen_latents[1][:, -1], normalized_first))
+        self.assertTrue(
+            torch.allclose(prediction[:, 1], normalized_first + 2.0)
+        )
 
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
@@ -167,6 +174,39 @@ class TeacherForcedAutoregressiveLossTest(unittest.TestCase):
         gradient = model.action_projection.weight.grad
         self.assertIsNotNone(gradient)
         self.assertTrue(torch.isfinite(gradient).all())
+
+    def test_combined_loss_normalizes_encoder_latents_before_prediction(self):
+        model = ActionConditionedPredictor(_config()).eval()
+        latents = torch.randn(1, 3, 4, 12) * 7.0 + 5.0
+        actions = torch.randn(1, 2, 12)
+        seen_teacher = []
+        seen_initial = []
+
+        def fake_teacher(inputs, context_actions):
+            seen_teacher.append(inputs.detach().clone())
+            return torch.zeros_like(inputs)
+
+        def fake_rollout(initial, context_actions):
+            seen_initial.append(initial.detach().clone())
+            return torch.zeros(
+                initial.shape[0],
+                context_actions.shape[1],
+                initial.shape[1],
+                initial.shape[2],
+            )
+
+        with patch.object(model, "predict_teacher_forced", side_effect=fake_teacher):
+            with patch.object(model, "rollout", side_effect=fake_rollout):
+                teacher_forced_autoregressive_loss(
+                    model,
+                    latents,
+                    actions,
+                    auto_steps=2,
+                )
+
+        expected = torch.nn.functional.layer_norm(latents, (12,))
+        self.assertTrue(torch.allclose(seen_teacher[0], expected[:, :-1]))
+        self.assertTrue(torch.allclose(seen_initial[0], expected[:, 0]))
 
     def test_auto_steps_cannot_exceed_available_transitions(self):
         model = ActionConditionedPredictor(_config())

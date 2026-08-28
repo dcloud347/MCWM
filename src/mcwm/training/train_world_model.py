@@ -463,6 +463,24 @@ def _scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, scale)
 
 
+def _adamw_parameter_groups(model: nn.Module) -> list:
+    """按 V-JEPA 2-AC 语义排除 bias 和一维参数的 weight decay。"""
+
+    decay = []
+    no_decay = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if "bias" in name or parameter.ndim == 1:
+            no_decay.append(parameter)
+        else:
+            decay.append(parameter)
+    return [
+        {"params": decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
 def _accumulation_steps(config: Mapping[str, Any], world_size: int) -> int:
     """按全局有效 batch 计算每张卡需要执行的梯度累积次数。"""
 
@@ -792,7 +810,7 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer_config = config["optimizer"]
     optimizer = torch.optim.AdamW(
-        trainable,
+        _adamw_parameter_groups(model),
         lr=float(optimizer_config["learning_rate"]),
         weight_decay=float(optimizer_config.get("weight_decay", 0.0)),
     )

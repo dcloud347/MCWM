@@ -83,13 +83,18 @@ M2 不维护新的 online/EMA encoder，不对视觉 encoder 反向传播，也�
 
 ### 3.2 M2 默认使用 normalized latent prediction loss
 
-预测和冻结 target latent 都沿最后一维做无仿射 LayerNorm，然后计算 L1：
+冻结 target latent 先沿最后一维做无仿射 LayerNorm，再作为 predictor 输入和
+监督目标。每一步 prediction 也做相同归一化后再回灌到下一步 rollout，最后计算
+归一化 latent L1：
 
 ```text
 L_tf = mean(abs(normalize(ẑ_tf) - normalize(z_target)))
 L_ar = mean(abs(normalize(ẑ_ar) - normalize(z_target)))
 L_wm = L_tf + L_ar
 ```
+
+为保留尺度退化预警，训练输出同时保留 LayerNorm 前的 prediction 供 diagnostics
+统计；这不改变 loss 或 autoregressive feedback 的官方语义。
 
 正式配置使用 `auto_steps=4`，在训练吞吐和多步 rollout 监督之间取平衡。SIGReg、IDM 和 pixel reconstruction 都不是 M2 默认 loss；若启用，必须作为独立扩展实验。
 
@@ -316,7 +321,7 @@ Predictor 是一个 causal Transformer，从随机初始化开始训练：
 | head dim | 64 |
 | MLP hidden dim | 4096 |
 | output dim | 1024 |
-| dropout | 0.1 |
+| dropout | 0.0 |
 | conditioning | action-token interleaving |
 | gradient checkpointing | 正式训练逐 Transformer block 启用 |
 | 参数量 | 约 305M |
@@ -439,7 +444,7 @@ M2 checkpoint 只保存可训练的 action encoder 和 predictor，并用 path/h
 |---|---:|
 | optimizer | AdamW |
 | learning rate | 1e-4 |
-| weight decay | 0.05 |
+| weight decay | 0.04（bias 与一维参数为 0） |
 | precision | bf16；loss FP32 |
 | effective batch | 64 clips（双卡全局 batch） |
 | sampled frames | 12 |

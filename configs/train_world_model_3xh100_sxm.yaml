@@ -53,18 +53,20 @@ model:
     mlp_dim: 4096
     context_blocks: 16
     spatial_grid: [18, 32]
-    dropout: 0.1
+    # 对齐 V-JEPA 2-AC，避免 rollout 逐步累积 dropout 噪声。
+    dropout: 0.0
     # 正式训练启用，逐 block 重算激活以降低显存峰值。
     gradient_checkpointing: true
 
 optimizer:
   learning_rate: 0.0001
-  weight_decay: 0.05
+  # 矩阵权重使用 0.04；bias 和一维参数由代码排除 weight decay。
+  weight_decay: 0.04
   gradient_clip: 1.0
   # 16 samples/GPU x 3 GPUs x 1 micro-step = 48，因此不需要梯度累积。
   effective_batch_size: 48
   iterations_per_epoch: 200
-  epochs: 40
+  epochs: 30
   # 前约 400 个 optimizer steps 线性增大学习率，之后进入 cosine 衰减阶段。
   warmup_steps: 400
 

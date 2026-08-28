@@ -26,7 +26,7 @@ class ACPredictorConfig:
     mlp_dim: int = 4096
     context_blocks: int = 16
     spatial_grid: Tuple[int, int] = (18, 32)
-    dropout: float = 0.1
+    dropout: float = 0.0
     gradient_checkpointing: bool = True
 
     def __post_init__(self) -> None:
@@ -300,7 +300,7 @@ class ActionConditionedPredictor(nn.Module):
         return self.predict_teacher_forced(latents, actions)
 
     def rollout(self, initial_latent: Tensor, actions: Tensor) -> Tensor:
-        """从真实初始 latent 开始，逐步反馈预测结果。"""
+        """从真实初始 latent 开始，逐步反馈归一化后的预测结果。"""
 
         if actions.ndim != 3 or actions.shape[2] != self.config.action_dim:
             raise ValueError(
@@ -322,7 +322,12 @@ class ActionConditionedPredictor(nn.Module):
         if horizon == 0:
             return initial_latent.unsqueeze(1)[:, :0]
 
-        states = [initial_latent]
+        states = [
+            F.layer_norm(
+                initial_latent,
+                (initial_latent.shape[-1],),
+            )
+        ]
         predictions = []
         for step in range(horizon):
             start = max(0, len(states) - self.config.context_blocks)
@@ -333,7 +338,15 @@ class ActionConditionedPredictor(nn.Module):
                 context_actions,
             )[:, -1]
             predictions.append(next_latent)
-            states.append(next_latent)
+            # V-JEPA 2-AC 在每一步预测后立即归一化，再把结果回灌到下一步。
+            # predictions 保留归一化前的值，供尺度退化诊断使用；loss 会对其
+            # 做同样的 LayerNorm，因此训练目标与官方实现等价。
+            states.append(
+                F.layer_norm(
+                    next_latent,
+                    (next_latent.shape[-1],),
+                )
+            )
         return torch.stack(predictions, dim=1)
 
 
@@ -372,15 +385,21 @@ def teacher_forced_autoregressive_loss(
     if not 1 <= auto_steps <= transitions:
         raise ValueError("auto_steps must be in [1, T]")
 
-    targets = latents[:, 1:].detach()
+    # 官方 V-JEPA 2-AC 会先归一化冻结 encoder 的表示，再将其作为 predictor
+    # 输入和监督目标。保持原 dtype，避免破坏外层 autocast/FSDP 混合精度。
+    normalized_latents = F.layer_norm(
+        latents,
+        (latents.shape[-1],),
+    )
+    targets = normalized_latents[:, 1:].detach()
     teacher_predictions = predictor.predict_teacher_forced(
-        latents[:, :-1],
+        normalized_latents[:, :-1],
         actions,
     )
     teacher_loss = normalized_latent_l1_loss(teacher_predictions, targets)
 
     autoregressive_predictions = predictor.rollout(
-        latents[:, 0],
+        normalized_latents[:, 0],
         actions[:, :auto_steps],
     )
     autoregressive_targets = targets[:, :auto_steps]
