@@ -1,66 +1,185 @@
+# M2 世界模型正式训练配置。
+#
+# 一条样本包含 8 帧画面，以及相邻画面之间的 7 个 action blocks：
+#   frames:  [B, 8, 3, 360, 640]
+#   actions: [B, 7, K, ...]，K 是 padding 后的最大 tick 数
+# 冻结的 M1 visual encoder 把每帧变成 576 个 visual tokens；训练时只更新
+# Minecraft Action Encoder 和 Frame/Block-Causal Predictor。
+
+# 随机种子：影响模型初始化、Dataset 随机选片段等随机过程。
 seed: 2026
+
+# 正式训练使用 NVIDIA GPU；如果只做本地小规模检查，可以改为 cpu。
 device: cuda
+
+# 混合精度类型。bf16 通常比 fp16 更不容易出现数值溢出，但需要硬件支持。
 precision: bf16
+
+# M2 checkpoint、训练日志和诊断图片的输出目录。
 output_dir: artifacts/m2-world-model
+
+# 已训练完成的 M1 checkpoint。
+# M2 会冻结其中的 target visual encoder，只把它当作视觉特征提取器使用。
+# 恢复 M2 训练时还会校验该 M1 的路径、文件哈希和数据来源，防止换错父模型。
 m1_checkpoint: artifacts/m1-visual-base/checkpoint-00024000.pt
+
 data:
+  # canonical dataset 根目录，目录内应包含 dataset_manifest.json 和各数据 split。
   root: data/canonical
+
+  # 训练集和验证集名称，必须与 dataset manifest 中登记的 split 一致。
   train_split: train
   validation_split: validation
+
+  # 每条样本取 8 帧，因此会形成 7 个“当前帧 -> 下一帧”的预测区间。
   frames_per_sample: 8
+
+  # 按 4 FPS 抽取画面，理想情况下相邻画面的 PTS 间隔约为 250 毫秒。
+  # 两个画面 PTS 之间的全部原始 action ticks 都会归入对应 action block。
   sample_fps: 4
-  samples_per_video: 1
-  batch_size: 1
+
+  # 每个视频在一个 epoch 中提供多少个随机采样槽位。
+  # 它不表示固定切出多少段；每次访问槽位时仍会随机选择视频片段。
+  samples_per_video: 8
+
+  # 单次前向/反向使用的样本数，也叫 micro batch size。
+  # 实际有效 batch size 由下面的 effective_batch_size 和梯度累积共同决定。
+  batch_size: 32
+
+  # DataLoader 并行读取数据的子进程数。内存不足或调试时可以调小。
   workers: 8
+
 model:
-  auto_steps: 2
-  encoder_frame_chunk_size: 1
+  # 自回归 loss 连续预测几步。
+  # 这里为 4：从真实 z0 开始，连续使用模型自己的预测结果向后滚动 4 步。
+  # 在 4 FPS 下对应约 1 秒；总 loss 同时包含 teacher-forced 和该自回归 loss。
+  auto_steps: 4
+
+  # 冻结的 visual encoder 每次处理多少张展平后的帧。
+  # 当前 batch_size=32、每条样本 8 帧，共 256 帧，因此 256 会一次编码完整 batch。
+  # 这是最高吞吐、同时也是最高显存占用的设置。
+  encoder_frame_chunk_size: 256
+
   action_encoder:
+    # 14 个二进制动作分量各自使用独立 embedding，每个 embedding 输出 16 维。
     binary_embedding_dim: 16
+
+    # hotbar 是 10 类离散值：0 表示不切换，1..9 表示切换对应快捷栏。
     hotbar_embedding_dim: 32
+
+    # camera MLP 和 cursor MLP 各自输出的特征维度。
     camera_dim: 64
     cursor_dim: 64
+
+    # 拼接 binary、hotbar、camera、cursor 和状态后，融合 MLP 的隐藏层维度。
     component_hidden_dim: 512
+
+    # 每个 ActionTick 融合后的 token 维度。
     tick_dim: 256
+
+    # 用两层 Transformer 按时间顺序汇总同一个 action block 内的多个 ticks。
     depth: 2
     heads: 8
     mlp_dim: 1024
+
+    # 一个 action block 最终汇总成的 macro-action token 维度。
+    # 必须与 predictor.action_dim 一致。
     macro_dim: 1024
+
+    # Action Encoder Transformer 的 dropout；0 表示不使用 dropout。
     dropout: 0.0
+
+    # camera 的 pitch/yaw 增量会先截断到 [-180, 180] 度，避免异常值过大。
     camera_clip_degrees: 180.0
+
+    # mu-law 压缩系数。它会压缩大幅转动，同时保留小幅转动之间的差异。
     camera_mu: 255.0
+
   predictor:
+    # 每个 visual token 的维度，必须与冻结的 M1 visual encoder 输出一致。
     latent_dim: 1024
+
+    # 每个 macro-action token 的维度，必须与 action_encoder.macro_dim 一致。
     action_dim: 1024
+
+    # Predictor 主干的 token 维度、层数、注意力头数和 FFN 隐藏维度。
     dim: 1024
     depth: 24
     heads: 16
     mlp_dim: 4096
+
+    # Predictor 最多允许同时看到多少个时间 block。
+    # 当前 8 帧样本只有 7 个预测 block，因此 16 留出了更长序列的余量。
     context_blocks: 16
+
+    # 一帧的 visual tokens 排列为 18 行 x 32 列，共 576 个空间位置。
+    # 该形状必须与 M1 patch 划分得到的 token 网格一致。
     spatial_grid: [18, 32]
+
+    # Predictor 内 attention 和 FFN 使用的 dropout。
     dropout: 0.1
+
 optimizer:
+  # AdamW 的初始最大学习率；warmup 后会按 cosine 曲线逐渐下降。
   learning_rate: 0.0001
+
+  # AdamW 权重衰减，用于约束可训练参数规模。
   weight_decay: 0.05
+
+  # 反向传播后按全局梯度范数裁剪，避免偶发梯度爆炸。
   gradient_clip: 1.0
-  effective_batch_size: 16
+
+  # 梯度累积后的有效 batch size。
+  # 当前 batch_size=32，所以每累计 2 个 micro batches 执行一次 optimizer step。
+  effective_batch_size: 64
+
+  # 每个 epoch 执行的 optimizer steps 数，而不是 DataLoader batch 数。
   iterations_per_epoch: 300
+
+  # 总训练量为 300 x 80 = 24,000 个 optimizer steps。
   epochs: 80
+
+  # 前 400 个 optimizer steps 线性增大学习率，之后进入 cosine 衰减阶段。
   warmup_steps: 400
+
 validation:
+  # 每 1,200 个 optimizer steps 运行一次验证。
   every_steps: 1200
-  batches: 16
+
+  # 每次验证最多计算 32 个 validation batches；更多样本能让指标更加稳定。
+  batches: 32
+
 checkpoint:
+  # 每 1,200 个 optimizer steps 保存一次 M2 checkpoint。
   every_steps: 1200
+
+  # 只保留最近 3 个定期 checkpoint，避免长期训练持续占用磁盘。
   keep_last: 3
+
+  # 恢复训练时填写 M2 checkpoint 路径；null 表示从头开始训练 M2。
+  # 恢复时会校验配置、dataset manifest 和 M1 父 checkpoint 是否一致。
   resume: null
+
 wandb:
+  # 是否把训练指标记录到 Weights & Biases。
   enabled: true
+
+  # online 会实时上传；离线环境可改为 offline，之后再手动同步。
   mode: online
+
+  # null 表示使用当前 W&B 登录账号的默认 entity。
   entity: null
+
+  # W&B 中的项目、实验分组和单次 run 名称。
   project: mcwm
   group: m2-world-model
   name: null
+
+  # 用于在 W&B 中筛选实验的标签。
   tags: [vpt, contractor, m2]
+
+  # 每隔多少个 optimizer steps 写入一次常规训练指标。
   log_every_steps: 10
+
+  # 高开销诊断的预期间隔；当前主要诊断仍随 validation 一起执行。
   diagnostics_every_steps: 200
