@@ -75,6 +75,8 @@ validation:
   # 指标会跨 rank 汇总，只有 rank 0 写日志和诊断图片。
   every_steps: 400
   batches: 64
+  # 三个 rank 合计汇总 24 个 batch 的逐 transition paired errors。
+  action_sensitivity_batches: 8
 
 checkpoint:
   # 只有 rank 0 写文件；checkpoint 保存三张卡各自的 RNG 和统一 sampler 位置。

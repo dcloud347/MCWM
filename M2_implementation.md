@@ -370,7 +370,10 @@ gap_noop     = error_noop - error_real
 ratio        = error_real / error_baseline
 ```
 
-正式 gate 在 validation set 上使用置信区间或 permutation test，不只依赖肉眼观察。
+正式 gate 在 validation set 上汇总全部 rank 的逐 transition paired errors，统一计算
+置信区间和 permutation test，不对各 rank 的 pass 布尔值求平均。训练期间可通过
+`validation.action_sensitivity_batches` 控制周期性诊断成本；`--eval-only` 始终覆盖
+配置指定的全部 validation batches，并输出独立 JSON 验收报告。
 
 ## 10. 诊断与验收
 

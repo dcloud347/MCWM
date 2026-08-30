@@ -759,7 +759,9 @@ MCWM/
 - 完成 B0/B1 训练与 action sensitivity 诊断。
 - 支持单机双卡 FSDP：数据和模型状态按 rank 分片，验证指标跨 rank 汇总，rank 0 独占 W&B 和 checkpoint 写入。
 
-完成条件：真实动作条件显著优于 shuffled/no-op，one-step validation loss 稳定。
+完成条件：汇总全部 validation rank 的逐 transition paired errors 后，真实动作条件
+显著优于 shuffled/no-op，且 one-step validation loss 稳定。不得把各 rank 的统计
+pass 布尔值平均后作为全局结论。
 
 ### M3：多步 latent rollout
 

@@ -243,6 +243,19 @@ def validate_world_model_config(config: Mapping[str, Any]) -> None:
         raise ValueError("predictor context must cover all sample transitions")
     if int(config["validation"].get("every_steps", 0)) <= 0:
         raise ValueError("validation.every_steps must be positive")
+    validation_batches = int(config["validation"].get("batches", 0))
+    if validation_batches <= 0:
+        raise ValueError("validation.batches must be positive")
+    sensitivity_batches = int(
+        config["validation"].get(
+            "action_sensitivity_batches",
+            min(validation_batches, 8),
+        )
+    )
+    if not 1 <= sensitivity_batches <= validation_batches:
+        raise ValueError(
+            "validation.action_sensitivity_batches must be between 1 and batches"
+        )
     if int(config["checkpoint"].get("every_steps", 0)) <= 0:
         raise ValueError("checkpoint.every_steps must be positive")
 

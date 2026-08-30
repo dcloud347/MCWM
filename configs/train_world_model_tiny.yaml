@@ -60,6 +60,7 @@ optimizer:
 validation:
   every_steps: 10
   batches: 1
+  action_sensitivity_batches: 1
 checkpoint:
   every_steps: 1
   keep_last: 2

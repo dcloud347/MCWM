@@ -116,6 +116,19 @@ PYTHONPATH=src torchrun --standalone --nproc-per-node=2 \
   --config configs/train_world_model_2xh100_sxm.yaml
 ```
 
+Re-run the formal M2 gate without training. Evaluation verifies the M1 parent
+and data manifest, uses every configured validation batch for action
+sensitivity, gathers per-transition paired errors across ranks, and writes one
+global statistical decision:
+
+```bash
+PYTHONPATH=src torchrun --standalone --nproc-per-node=3 \
+  -m mcwm.training.train_world_model \
+  --config artifacts/20260829/train_world_model_3xh100_sxm.yaml \
+  --eval-only artifacts/20260829/checkpoint-00006000.pt \
+  --evaluation-output artifacts/20260829/m2_evaluation.json
+```
+
 For this FSDP configuration, `data.batch_size` is per GPU and
 `optimizer.effective_batch_size` is global across both GPUs.
 

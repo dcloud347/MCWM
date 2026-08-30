@@ -152,6 +152,9 @@ validation:
   # 每次验证最多计算 64 个 validation batches；更多样本能让指标更加稳定。
   batches: 64
 
+  # 周期性训练验证在 8 个 batch 上运行动作扰动；--eval-only 会覆盖全部 64 个。
+  action_sensitivity_batches: 8
+
 checkpoint:
   # 每 1,200 个 optimizer steps 保存一次 M2 checkpoint。
   every_steps: 1200

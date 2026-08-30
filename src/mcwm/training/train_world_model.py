@@ -13,7 +13,7 @@ from pathlib import Path
 import random
 import subprocess
 import time
-from typing import Any, Dict, Iterator, Mapping, Tuple
+from typing import Any, Dict, Iterator, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -27,7 +27,8 @@ from mcwm.data.world_model_dataset import (
     collate_world_model_samples,
 )
 from mcwm.diagnostics.world_model import (
-    action_sensitivity_from_predictions,
+    action_sensitivity_from_samples,
+    action_sensitivity_samples_from_predictions,
     spatial_error_images,
     world_model_prediction_metrics,
 )
@@ -256,6 +257,26 @@ def _training_signature(config: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _evaluation_signature(config: Mapping[str, Any]) -> str:
+    """提取决定 M2 validation 语义的配置，允许改变运行和输出设置。"""
+
+    data = config["data"]
+    value = {
+        "seed": int(config.get("seed", 0)),
+        "model": resolved_copy(config)["model"],
+        "data": {
+            name: data.get(name)
+            for name in (
+                "validation_split",
+                "frames_per_sample",
+                "sample_fps",
+                "samples_per_video",
+            )
+        },
+    }
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def _synthetic_visual_encoder(config: Mapping[str, Any]) -> FrozenVisualEncoder:
     value = config["model"]["synthetic_visual_encoder"]
     encoder_config = VisualEncoderConfig(
@@ -371,6 +392,34 @@ def _make_loaders(
         **common,
     )
     return train_loader, validation_loader, manifest_hash
+
+
+def _visual_encoder_and_parent(
+    config: Mapping[str, Any],
+    *,
+    synthetic: bool,
+    manifest_hash: str,
+) -> Tuple[FrozenVisualEncoder, str, str]:
+    """构建冻结视觉 encoder，并返回可验证的 M1 parent 路径和哈希。"""
+
+    if synthetic:
+        visual_encoder = _synthetic_visual_encoder(config)
+        parent_path = "synthetic://random-frozen-m1"
+        parent_value = json.dumps(
+            {
+                "seed": int(config.get("seed", 0)),
+                "config": config["model"]["synthetic_visual_encoder"],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        return visual_encoder, parent_path, sha256(parent_value).hexdigest()
+
+    m1_path = Path(str(config.get("m1_checkpoint")))
+    visual_encoder, _ = load_frozen_m1_encoder(
+        m1_path,
+        expected_manifest_hash=manifest_hash,
+    )
+    return visual_encoder, str(m1_path), checkpoint_sha256(m1_path)
 
 
 def _batch_stream(
@@ -522,12 +571,17 @@ def validate(
     precision: str,
     batches: int,
     spatial_grid: Tuple[int, int],
+    action_sensitivity_batches: Optional[int] = None,
     progress_label: str = "validation",
 ) -> Tuple[Dict[str, float], list]:
-    """计算 validation prediction、collapse 与 action sensitivity 指标。"""
+    """计算验证指标，并在汇总逐 transition 样本后执行一次动作检验。"""
+
+    if action_sensitivity_batches is not None and action_sensitivity_batches <= 0:
+        raise ValueError("action_sensitivity_batches must be positive")
 
     model.eval()
     collected: Dict[str, list] = {}
+    sensitivity_collected: Dict[str, list[Tensor]] = {}
     images = []
     validation_rank = (
         torch.distributed.get_rank()
@@ -551,28 +605,34 @@ def validate(
         batch = _to_device(raw_batch, device)
         with _autocast_context(device, precision):
             output = model(**batch)
+            collect_sensitivity = (
+                action_sensitivity_batches is None
+                or batch_index < action_sensitivity_batches
+            )
             variant_predictions = (
                 {
                     name: model(**variant)["teacher_forced_predictions"]
                     for name, variant in _action_variant_batches(batch).items()
                 }
-                if batch_index == 0
+                if collect_sensitivity
                 else {}
             )
         metrics = world_model_prediction_metrics(output)
-        if batch_index == 0:
-            metrics.update(
-                action_sensitivity_from_predictions(
-                    output["teacher_forced_predictions"],
-                    variant_predictions["shuffled"],
-                    variant_predictions["noop"],
-                    variant_predictions["camera"],
-                    variant_predictions["swapped"],
-                    output["targets"],
-                    batch,
-                )
+        if collect_sensitivity:
+            sensitivity_samples = action_sensitivity_samples_from_predictions(
+                output["teacher_forced_predictions"],
+                variant_predictions["shuffled"],
+                variant_predictions["noop"],
+                variant_predictions["camera"],
+                variant_predictions["swapped"],
+                output["targets"],
+                batch,
             )
-            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            for name, values in sensitivity_samples.items():
+                sensitivity_collected.setdefault(name, []).append(
+                    values.detach().cpu()
+                )
+            if batch_index == 0 and validation_rank == 0:
                 images = spatial_error_images(
                     output["teacher_forced_predictions"],
                     output["targets"],
@@ -594,6 +654,8 @@ def validate(
     model.train()
     if not collected:
         raise ValueError("validation loader produced no batches")
+    if not sensitivity_collected:
+        raise ValueError("validation did not collect action sensitivity samples")
     metrics = {
         name: sum(values) / len(values)
         for name, values in collected.items()
@@ -607,6 +669,29 @@ def validate(
             / sum(name in rank_metrics for rank_metrics in gathered)
             for name in names
         }
+    local_samples = {
+        name: torch.cat(values)
+        for name, values in sensitivity_collected.items()
+    }
+    if torch.distributed.is_initialized():
+        gathered_samples = [None for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(gathered_samples, local_samples)
+        sample_names = set().union(
+            *(rank_samples.keys() for rank_samples in gathered_samples)
+        )
+        global_samples = {
+            name: torch.cat(
+                [
+                    rank_samples[name]
+                    for rank_samples in gathered_samples
+                    if name in rank_samples
+                ]
+            )
+            for name in sample_names
+        }
+    else:
+        global_samples = local_samples
+    metrics.update(action_sensitivity_from_samples(global_samples))
     return metrics, images
 
 
@@ -762,6 +847,53 @@ def _load_distributed_checkpoint(
     return payload
 
 
+def _load_distributed_evaluation_checkpoint(
+    path: Path,
+    *,
+    model: nn.Module,
+    manifest_hash: str,
+    m1_parent_path: str,
+    m1_parent_hash: str,
+    world_size: int,
+) -> Dict[str, Any]:
+    """只加载 M2 模型状态；评估不恢复 optimizer、sampler 或 RNG。"""
+
+    if world_size > 1:
+        from torch.distributed.fsdp import (
+            FullStateDictConfig,
+            FullyShardedDataParallel as FSDP,
+            StateDictType,
+        )
+
+        with FSDP.state_dict_type(
+            model,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=False),
+        ):
+            return load_world_model_checkpoint(
+                path,
+                model=model,
+                optimizer=None,
+                scheduler=None,
+                scaler=None,
+                expected_manifest_hash=manifest_hash,
+                expected_m1_parent_path=m1_parent_path,
+                expected_m1_parent_sha256=m1_parent_hash,
+                restore_rng=False,
+            )
+    return load_world_model_checkpoint(
+        path,
+        model=model,
+        optimizer=None,
+        scheduler=None,
+        scaler=None,
+        expected_manifest_hash=manifest_hash,
+        expected_m1_parent_path=m1_parent_path,
+        expected_m1_parent_sha256=m1_parent_hash,
+        restore_rng=False,
+    )
+
+
 def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
     """训练 M2，并返回最终 checkpoint 路径。"""
 
@@ -780,25 +912,11 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
         rank=rank,
         world_size=world_size,
     )
-    if synthetic:
-        visual_encoder = _synthetic_visual_encoder(config)
-        m1_parent_path = "synthetic://random-frozen-m1"
-        parent_value = json.dumps(
-            {
-                "seed": seed,
-                "config": config["model"]["synthetic_visual_encoder"],
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-        m1_parent_hash = sha256(parent_value).hexdigest()
-    else:
-        m1_path = Path(str(config.get("m1_checkpoint")))
-        visual_encoder, _ = load_frozen_m1_encoder(
-            m1_path,
-            expected_manifest_hash=manifest_hash,
-        )
-        m1_parent_path = str(m1_path)
-        m1_parent_hash = checkpoint_sha256(m1_path)
+    visual_encoder, m1_parent_path, m1_parent_hash = _visual_encoder_and_parent(
+        config,
+        synthetic=synthetic,
+        manifest_hash=manifest_hash,
+    )
 
     base_model = build_world_model(config, visual_encoder)
     model = _wrap_distributed(
@@ -1023,6 +1141,12 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
                         int(value)
                         for value in config["model"]["predictor"]["spatial_grid"]
                     ),
+                    action_sensitivity_batches=int(
+                        config["validation"].get(
+                            "action_sensitivity_batches",
+                            min(int(config["validation"]["batches"]), 8),
+                        )
+                    ),
                     progress_label=f"validation step {optimizer_step}",
                 )
                 if rank == 0:
@@ -1091,6 +1215,115 @@ def train(config: Mapping[str, Any], *, synthetic: bool = False) -> Path:
             torch.distributed.destroy_process_group()
 
 
+def evaluate(
+    config: Mapping[str, Any],
+    checkpoint: Path,
+    *,
+    synthetic: bool = False,
+    output_path: Optional[Path] = None,
+) -> Path:
+    """加载完成的 M2 checkpoint，在完整配置验证集上生成独立验收报告。"""
+
+    validate_world_model_config(config)
+    checkpoint = Path(checkpoint)
+    seed = int(config.get("seed", 0))
+    strategy = str(config.get("distributed", {}).get("strategy", "none"))
+    rank, _, world_size, device = _distributed_context(
+        strategy,
+        str(config["device"]),
+    )
+    _seed_everything(seed + rank)
+    if output_path is None:
+        output_path = Path(str(config["output_dir"])) / "m2_evaluation.json"
+    else:
+        output_path = Path(output_path)
+
+    try:
+        _, validation_loader, manifest_hash = _make_loaders(
+            config,
+            synthetic=synthetic,
+            rank=rank,
+            world_size=world_size,
+        )
+        visual_encoder, m1_parent_path, m1_parent_hash = (
+            _visual_encoder_and_parent(
+                config,
+                synthetic=synthetic,
+                manifest_hash=manifest_hash,
+            )
+        )
+        model = _wrap_distributed(
+            build_world_model(config, visual_encoder),
+            device=device,
+            world_size=world_size,
+            precision=str(config["precision"]),
+        )
+        payload = _load_distributed_evaluation_checkpoint(
+            checkpoint,
+            model=model,
+            manifest_hash=manifest_hash,
+            m1_parent_path=m1_parent_path,
+            m1_parent_hash=m1_parent_hash,
+            world_size=world_size,
+        )
+        saved_config = payload["provenance"]["config"]
+        if _evaluation_signature(saved_config) != _evaluation_signature(config):
+            raise ValueError("evaluation changes M2 model or validation data semantics")
+
+        validation_batches = int(config["validation"]["batches"])
+        metrics, _ = validate(
+            model,
+            validation_loader,
+            device=device,
+            precision=str(config["precision"]),
+            batches=validation_batches,
+            spatial_grid=tuple(
+                int(value)
+                for value in config["model"]["predictor"]["spatial_grid"]
+            ),
+            action_sensitivity_batches=validation_batches,
+            progress_label=f"M2 evaluation step {payload['optimizer_step']}",
+        )
+        statistical_pass = metrics["action_sensitivity/pass_statistical"] == 1.0
+        gate = {
+            "real_better_than_shuffled": (
+                metrics["action_sensitivity/gap_shuffled"] > 0.0
+            ),
+            "real_better_than_noop": (
+                metrics["action_sensitivity/gap_noop"] > 0.0
+            ),
+            "global_statistical_pass": statistical_pass,
+        }
+        gate["pass"] = all(gate.values())
+        report = {
+            "format_version": 1,
+            "stage": "m2-world-model-evaluation",
+            "checkpoint": str(checkpoint),
+            "optimizer_step": int(payload["optimizer_step"]),
+            "evaluation_world_size": world_size,
+            "validation_batches_per_rank": validation_batches,
+            "manifest_hash": manifest_hash,
+            "m1_parent_path": m1_parent_path,
+            "m1_parent_sha256": m1_parent_hash,
+            "checkpoint_git_commit": payload["provenance"]["git_commit"],
+            "gate": gate,
+            "metrics": metrics,
+        }
+        if rank == 0:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
+            with temporary_path.open("w", encoding="utf-8") as handle:
+                json.dump(report, handle, indent=2, sort_keys=True, allow_nan=False)
+                handle.write("\n")
+            temporary_path.replace(output_path)
+        if world_size > 1:
+            torch.distributed.barrier()
+        return output_path
+    finally:
+        if world_size > 1 and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1099,9 +1332,27 @@ def main() -> None:
         default=Path("configs/train_world_model.yaml"),
     )
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--eval-only",
+        type=Path,
+        metavar="CHECKPOINT",
+        help="load CHECKPOINT and write a validation-only M2 gate report",
+    )
+    parser.add_argument(
+        "--evaluation-output",
+        type=Path,
+        help="JSON report path used with --eval-only",
+    )
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--max-steps", type=int)
     args = parser.parse_args()
+
+    if args.evaluation_output is not None and args.eval_only is None:
+        parser.error("--evaluation-output requires --eval-only")
+    if args.eval_only is not None and args.resume is not None:
+        parser.error("--eval-only and --resume cannot be used together")
+    if args.eval_only is not None and args.max_steps is not None:
+        parser.error("--max-steps does not apply to --eval-only")
 
     config = load_yaml_config(args.config)
     if args.resume is not None:
@@ -1109,9 +1360,17 @@ def main() -> None:
     if args.max_steps is not None:
         config["optimizer"]["iterations_per_epoch"] = int(args.max_steps)
         config["optimizer"]["epochs"] = 1
-    checkpoint = train(config, synthetic=args.synthetic)
+    if args.eval_only is not None:
+        result = evaluate(
+            config,
+            args.eval_only,
+            synthetic=args.synthetic,
+            output_path=args.evaluation_output,
+        )
+    else:
+        result = train(config, synthetic=args.synthetic)
     if int(os.environ.get("RANK", "0")) == 0:
-        print(checkpoint)
+        print(result)
 
 
 if __name__ == "__main__":

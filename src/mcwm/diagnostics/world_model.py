@@ -157,20 +157,26 @@ def _paired_gap_statistics(
     else:
         margin = gaps.new_zeros(())
     generator = torch.Generator().manual_seed(2026)
-    signs = torch.randint(
-        0,
-        2,
-        (permutations, gaps.numel()),
-        generator=generator,
-        dtype=torch.float32,
-    ).mul_(2).sub_(1).to(gaps.device)
-    permuted = (signs * gaps.unsqueeze(0)).mean(dim=1)
-    p_value = (permuted >= mean).float().mean()
+    extreme = 0
+    completed = 0
+    while completed < permutations:
+        chunk = min(128, permutations - completed)
+        signs = torch.randint(
+            0,
+            2,
+            (chunk, gaps.numel()),
+            generator=generator,
+            dtype=torch.float32,
+        ).mul_(2).sub_(1).to(gaps.device)
+        permuted = (signs * gaps.unsqueeze(0)).mean(dim=1)
+        extreme += int((permuted >= mean).sum())
+        completed += chunk
+    p_value = extreme / permutations
     return float(mean - margin), float(mean + margin), float(p_value)
 
 
 @torch.no_grad()
-def action_sensitivity_from_predictions(
+def action_sensitivity_samples_from_predictions(
     real_prediction: Tensor,
     shuffled_prediction: Tensor,
     noop_prediction: Tensor,
@@ -178,27 +184,72 @@ def action_sensitivity_from_predictions(
     swap_prediction: Tensor,
     targets: Tensor,
     batch: Mapping[str, Tensor],
+) -> Dict[str, Tensor]:
+    """返回可跨 batch/rank 汇总的逐 transition 动作诊断样本。"""
+
+    predictions = {
+        "error_real": real_prediction,
+        "error_shuffled": shuffled_prediction,
+        "error_noop": noop_prediction,
+        "error_camera_reversed": camera_prediction,
+        "error_attack_use_swapped": swap_prediction,
+    }
+    if any(prediction.shape != targets.shape for prediction in predictions.values()):
+        raise ValueError("action sensitivity predictions and targets must match")
+    samples = {
+        name: _normalized_interval_error(prediction, targets).reshape(-1)
+        for name, prediction in predictions.items()
+    }
+    bucket_masks = {
+        "bucket_movement": batch["movement"].any(dim=-1).any(dim=-1),
+        "bucket_interaction": batch["interaction"].any(dim=-1).any(dim=-1),
+        "bucket_camera": batch["camera"].abs().sum(dim=-1).gt(0).any(dim=-1),
+        "bucket_hotbar": batch["hotbar"].ne(0).any(dim=-1),
+        "bucket_gui": batch["gui_open"].any(dim=-1),
+    }
+    samples.update(
+        {name: mask.reshape(-1) for name, mask in bucket_masks.items()}
+    )
+    return samples
+
+
+@torch.no_grad()
+def action_sensitivity_from_samples(
+    samples: Mapping[str, Tensor],
 ) -> Dict[str, float]:
-    """从五组预测计算动作敏感性，允许 FSDP 通过标准 forward 产生预测。"""
+    """从已汇总的逐 transition 样本计算一次全局动作敏感性统计。"""
 
-    real_error = normalized_latent_l1_loss(real_prediction, targets)
-    shuffled_error = normalized_latent_l1_loss(shuffled_prediction, targets)
-    noop_error = normalized_latent_l1_loss(noop_prediction, targets)
-    real_interval = _normalized_interval_error(real_prediction, targets)
-    shuffled_interval = _normalized_interval_error(shuffled_prediction, targets)
-    noop_interval = _normalized_interval_error(noop_prediction, targets)
+    error_names = (
+        "error_real",
+        "error_shuffled",
+        "error_noop",
+        "error_camera_reversed",
+        "error_attack_use_swapped",
+    )
+    missing = set(error_names) - samples.keys()
+    if missing:
+        raise ValueError(f"action sensitivity samples are missing: {sorted(missing)}")
+    errors = {
+        name: samples[name].detach().float().reshape(-1)
+        for name in error_names
+    }
+    sizes = {values.numel() for values in errors.values()}
+    if sizes == {0}:
+        raise ValueError("action sensitivity samples cannot be empty")
+    if len(sizes) != 1:
+        raise ValueError("action sensitivity error samples must have matching sizes")
+
+    real = errors["error_real"]
+    shuffled = errors["error_shuffled"]
+    noop = errors["error_noop"]
     shuffled_ci_low, shuffled_ci_high, shuffled_p = _paired_gap_statistics(
-        real_interval,
-        shuffled_interval,
+        real,
+        shuffled,
     )
-    noop_ci_low, noop_ci_high, noop_p = _paired_gap_statistics(
-        real_interval,
-        noop_interval,
-    )
-
-    camera_error = normalized_latent_l1_loss(camera_prediction, targets)
-    swap_error = normalized_latent_l1_loss(swap_prediction, targets)
-
+    noop_ci_low, noop_ci_high, noop_p = _paired_gap_statistics(real, noop)
+    real_error = real.mean()
+    shuffled_error = shuffled.mean()
+    noop_error = noop.mean()
     baseline = (shuffled_error + noop_error) / 2.0
     metrics = {
         "action_sensitivity/error_real": float(real_error),
@@ -213,28 +264,55 @@ def action_sensitivity_from_predictions(
         "action_sensitivity/gap_noop_ci95_low": noop_ci_low,
         "action_sensitivity/gap_noop_ci95_high": noop_ci_high,
         "action_sensitivity/gap_noop_pvalue": noop_p,
-        "action_sensitivity/error_camera_reversed": float(camera_error),
-        "action_sensitivity/error_attack_use_swapped": float(swap_error),
+        "action_sensitivity/error_camera_reversed": float(
+            errors["error_camera_reversed"].mean()
+        ),
+        "action_sensitivity/error_attack_use_swapped": float(
+            errors["error_attack_use_swapped"].mean()
+        ),
         "action_sensitivity/pass_statistical": float(
             shuffled_ci_low > 0
             and noop_ci_low > 0
             and shuffled_p < 0.05
             and noop_p < 0.05
         ),
+        "action_sensitivity/sample_transitions": float(real.numel()),
     }
 
-    interval_error = real_interval
-    buckets = {
-        "movement": batch["movement"].any(dim=-1).any(dim=-1),
-        "interaction": batch["interaction"].any(dim=-1).any(dim=-1),
-        "camera": batch["camera"].abs().sum(dim=-1).gt(0).any(dim=-1),
-        "hotbar": batch["hotbar"].ne(0).any(dim=-1),
-        "gui": batch["gui_open"].any(dim=-1),
-    }
-    for name, active in buckets.items():
+    for name in ("movement", "interaction", "camera", "hotbar", "gui"):
+        key = f"bucket_{name}"
+        if key not in samples:
+            continue
+        active = samples[key].detach().bool().reshape(-1)
+        if active.numel() != real.numel():
+            raise ValueError(f"{key} must match action sensitivity sample size")
         if bool(active.any()):
-            metrics[f"action_bucket/{name}_l1"] = float(interval_error[active].mean())
+            metrics[f"action_bucket/{name}_l1"] = float(real[active].mean())
     return metrics
+
+
+@torch.no_grad()
+def action_sensitivity_from_predictions(
+    real_prediction: Tensor,
+    shuffled_prediction: Tensor,
+    noop_prediction: Tensor,
+    camera_prediction: Tensor,
+    swap_prediction: Tensor,
+    targets: Tensor,
+    batch: Mapping[str, Tensor],
+) -> Dict[str, float]:
+    """从五组预测计算动作敏感性，允许 FSDP 通过标准 forward 产生预测。"""
+
+    samples = action_sensitivity_samples_from_predictions(
+        real_prediction,
+        shuffled_prediction,
+        noop_prediction,
+        camera_prediction,
+        swap_prediction,
+        targets,
+        batch,
+    )
+    return action_sensitivity_from_samples(samples)
 
 
 @torch.no_grad()
