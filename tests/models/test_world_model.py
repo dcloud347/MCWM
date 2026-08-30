@@ -104,6 +104,16 @@ class WorldModelTest(unittest.TestCase):
             any(parameter.grad is not None for parameter in model.predictor.parameters())
         )
 
+    def test_evaluation_can_override_trained_rollout_length(self):
+        model = _model()
+
+        output = model(**_batch(frames=7), rollout_steps=6)
+
+        self.assertEqual(
+            tuple(output["autoregressive_predictions"].shape),
+            (2, 6, 4, 12),
+        )
+
     def test_optimizer_parameters_exclude_visual_encoder(self):
         model = _model()
         trainable_ids = {id(parameter) for parameter in model.trainable_parameters()}

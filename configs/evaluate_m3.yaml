@@ -1,0 +1,20 @@
+# M3 只读评估：使用正式 M2 checkpoint，不修改或继续训练权重。
+m2_config: configs/train_world_model_3xh100_sxm.yaml
+checkpoint: artifacts/m2-world-model-3xh100-sxm/checkpoint-00006000.pt
+output: artifacts/m2-world-model-3xh100-sxm/m3_evaluation.json
+
+data:
+  # 16 帧提供 15 个 transition，可评估到 14-step。
+  frames_per_sample: 16
+  validation_batches: 64
+  # 以下数值均为每个 rank 的配置。
+  batch_size: 16
+  workers: 8
+  # null 表示沿用 m2_config.data.root；换机器挂载点不同时可在此覆盖。
+  root: null
+
+horizons: [1, 2, 4, 6, 8, 10, 12, 14]
+
+surprise:
+  # 1-based rollout step，位于 14-step 轨迹中部。
+  perturbation_step: 8

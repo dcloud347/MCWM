@@ -15,6 +15,8 @@ from .world_model import (
     world_model_prediction_metrics,
 )
 from .m2_b0 import run_b0_smoke_gate
+from .rollout import rollout_metrics, rollout_samples
+from .surprise import surprise_metrics, surprise_samples
 
 __all__ = [
     "action_sensitivity_from_predictions",
@@ -23,8 +25,12 @@ __all__ = [
     "action_sensitivity_samples_from_predictions",
     "noop_action_inputs",
     "rollout_error_curve",
+    "rollout_metrics",
+    "rollout_samples",
     "run_b0_smoke_gate",
     "spatial_error_images",
     "spatial_token_error",
+    "surprise_metrics",
+    "surprise_samples",
     "world_model_prediction_metrics",
 ]

@@ -111,6 +111,7 @@ class WorldModel(nn.Module):
         gui_open: Tensor,
         cursor_present: Tensor,
         valid_mask: Tensor,
+        rollout_steps: Optional[int] = None,
     ) -> Dict[str, Tensor]:
         """编码 batch，并计算 teacher-forced 与 autoregressive loss。"""
 
@@ -130,13 +131,20 @@ class WorldModel(nn.Module):
             cursor_present,
             valid_mask,
         )
-        if self.config.auto_steps > action_tokens.shape[1]:
-            raise ValueError("auto_steps cannot exceed the number of transitions")
+        requested_rollout_steps = (
+            self.config.auto_steps
+            if rollout_steps is None
+            else int(rollout_steps)
+        )
+        if requested_rollout_steps <= 0:
+            raise ValueError("rollout_steps must be positive")
+        if requested_rollout_steps > action_tokens.shape[1]:
+            raise ValueError("rollout_steps cannot exceed the number of transitions")
         output = teacher_forced_autoregressive_loss(
             self.predictor,
             latents,
             action_tokens,
-            auto_steps=self.config.auto_steps,
+            auto_steps=requested_rollout_steps,
         )
         output["latents"] = latents
         output["action_tokens"] = action_tokens

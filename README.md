@@ -15,7 +15,7 @@ is distributed, and the planning stack remains future work.
 | M0        | Canonical actions, ingestion, manifests, alignment, audits, and fixtures                 | Implemented                                       |
 | M1        | From-scratch visual encoder, masked-video predictor, EMA, diagnostics, and checkpointing | Implemented; no trained checkpoint is distributed |
 | M2        | Action encoder, block-causal predictor, rollout loss, training, and diagnostics            | Implemented; formal training/gates pending         |
-| M3        | Multi-step latent rollout                                                                | Planned                                           |
+| M3        | Multi-step latent rollout                                                                | Offline evaluation implemented; baseline pending  |
 | M4        | Online planning smoke test in MineRL (environment only)                                  | Planned                                           |
 
 MCWM is a research codebase under active development, not a pretrained model
@@ -128,6 +128,24 @@ PYTHONPATH=src torchrun --standalone --nproc-per-node=3 \
   --eval-only artifacts/20260829/checkpoint-00006000.pt \
   --evaluation-output artifacts/20260829/m2_evaluation.json
 ```
+
+Evaluate the accepted M2 checkpoint at `1/2/4/6/8/10/12/14` open-loop steps
+with 16-frame clips. The same pass also produces action-bucket, latent-health,
+and surprise diagnostics without changing model weights:
+
+```bash
+PYTHONPATH=src torchrun --standalone --nproc-per-node=3 \
+  -m mcwm.training.evaluate_m3 \
+  --config configs/evaluate_m3.yaml
+```
+
+Use `--max-batches 1 --output /tmp/m3-smoke.json` for a one-batch memory and
+runtime check before the full evaluation. `--batch-size` can lower per-GPU
+memory without changing checkpoint semantics.
+
+The report is written to
+`artifacts/m2-world-model-3xh100-sxm/m3_evaluation.json`. M3 remains incomplete
+until an `auto_steps=1` baseline is evaluated on the same sample IDs.
 
 For this FSDP configuration, `data.batch_size` is per GPU and
 `optimizer.effective_batch_size` is global across both GPUs.

@@ -222,14 +222,14 @@ o_0 --A_0--> o_1 --A_1--> ... --A_(T-1)--> o_T
 采用两层存储，避免一个不可增量维护的巨大 HDF5：
 
 1. **Canonical episode store**
-   - 原始或重封装 MP4
-   - Arrow/Parquet action table
-   - episode manifest JSON
-   - QA/audit report
+    - 原始或重封装 MP4
+    - Arrow/Parquet action table
+    - episode manifest JSON
+    - QA/audit report
 2. **Training shard cache**
-   - WebDataset tar shards
-   - 每个 sample 是连续 clip
-   - shard 由 manifest hash 和 preprocessing config 唯一命名
+    - WebDataset tar shards
+    - 每个 sample 是连续 clip
+    - shard 由 manifest hash 和 preprocessing config 唯一命名
 
 数据划分必须按 `session_id/world_id` 完成，不能随机按 clip 划分，否则同一个世界的相邻片段会泄漏到 train 和 validation。
 
@@ -454,7 +454,9 @@ M2 checkpoint 只保存可训练的 action encoder 和 predictor，并用 path/h
 
 ### 6.4 阶段 B2：多步 rollout training
 
-M2 正式配置训练 4-step rollout，并保留较短 horizon 指标。后续 M3 可继续加入 6、8 步及更长 open-loop rollout；它仍归入 prediction loss，不增加新的 loss 家族：
+M2 正式配置训练 4-step rollout，并保留较短 horizon 指标。M3 使用 16-frame
+validation clips 先评估 `1/2/4/6/8/10/12/14` 步 open-loop rollout；只有长
+horizon 明显失稳时才继续训练。它仍归入 prediction loss，不增加新的 loss 家族：
 
 ```text
 L_auto = (1/4) Σ_h=1..4 ‖LN(ẑ(t+h)) − LN(z_target(t+h))‖₁
@@ -765,11 +767,13 @@ pass 布尔值平均后作为全局结论。
 
 ### M3：多步 latent rollout
 
-- 实现多 horizon training 和 autoregressive rollout。
+- 使用 16-frame clips 实现 `1/2/4/6/8/10/12/14` 多 horizon 评估。
+- 先评估 M2 checkpoint，必要时再进行 8/12/14-step autoregressive training。
 - 完成 surprise、probe 和按动作类型分桶的分析。
 - 必要时以独立实验启用自训练 IDM head。
 
-完成条件：4/8 步 rollout 优于单步模型直接自由滚动，扰动点出现 surprise 峰值。
+完成条件：4/8/12/14 步 rollout 优于单步模型直接自由滚动，扰动点出现 surprise
+峰值，最终候选 checkpoint 重新通过 M2 action-sensitivity gate。
 
 ### M4：MineRL 1.0 planning smoke test
 

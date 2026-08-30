@@ -142,7 +142,7 @@ def noop_action_inputs(batch: Mapping[str, Tensor]) -> Dict[str, Tensor]:
     return result
 
 
-def _paired_gap_statistics(
+def paired_gap_statistics(
     real: Tensor,
     baseline: Tensor,
     *,
@@ -242,11 +242,11 @@ def action_sensitivity_from_samples(
     real = errors["error_real"]
     shuffled = errors["error_shuffled"]
     noop = errors["error_noop"]
-    shuffled_ci_low, shuffled_ci_high, shuffled_p = _paired_gap_statistics(
+    shuffled_ci_low, shuffled_ci_high, shuffled_p = paired_gap_statistics(
         real,
         shuffled,
     )
-    noop_ci_low, noop_ci_high, noop_p = _paired_gap_statistics(real, noop)
+    noop_ci_low, noop_ci_high, noop_p = paired_gap_statistics(real, noop)
     real_error = real.mean()
     shuffled_error = shuffled.mean()
     noop_error = noop.mean()
