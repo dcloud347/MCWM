@@ -27,6 +27,7 @@ def _action(
     hotbar=0,
     camera=(0.0, 0.0),
     gui_open=False,
+    cursor_present=False,
     valid=True,
 ):
     movement_names = ("forward", "back", "left", "right", "jump", "sneak", "sprint")
@@ -42,7 +43,7 @@ def _action(
         interaction=tuple(name in interaction for name in interaction_names),
         hotbar=hotbar,
         camera=camera,
-        cursor=(0.5, 0.5) if gui_open else None,
+        cursor=(0.5, 0.5) if gui_open or cursor_present else None,
         gui_open=gui_open,
         valid=True,
         timestamp_ms=timestamp,
@@ -62,6 +63,42 @@ def _config():
 
 
 class MacroCodebookTest(unittest.TestCase):
+    def test_cursor_metadata_only_blocks_gui_codes(self):
+        gameplay = fit_macro_codebook_from_episodes(
+            (
+                (
+                    "episode-gameplay",
+                    (
+                        _action(0, cursor_present=True),
+                        _action(250, cursor_present=True),
+                    ),
+                ),
+            ),
+            manifest_hash="manifest",
+            config=_config(),
+        )
+        noop = next(code for code in gameplay.codes if code.name == "noop")
+        self.assertTrue(noop.legality.cursor_present)
+        self.assertTrue(noop.legality.v1_supported)
+        self.assertNotIn("cursor_planning_unsupported", noop.legality.reasons)
+
+        gui = fit_macro_codebook_from_episodes(
+            (
+                (
+                    "episode-gui",
+                    (
+                        _action(0, gui_open=True),
+                        _action(250, gui_open=True),
+                    ),
+                ),
+            ),
+            manifest_hash="manifest",
+            config=_config(),
+        )
+        gui_code = next(code for code in gui.codes if code.gui_mode == "gui")
+        self.assertFalse(gui_code.legality.v1_supported)
+        self.assertIn("cursor_planning_unsupported", gui_code.legality.reasons)
+
     def test_fit_is_deterministic_and_preserves_basic_codes(self):
         actions = (
             _action(0),
@@ -81,6 +118,9 @@ class MacroCodebookTest(unittest.TestCase):
         self.assertEqual(first.to_dict(), second.to_dict())
         self.assertEqual(first.content_hash, second.content_hash)
         self.assertTrue(set(BASIC_CODE_NAMES).issubset({code.name for code in first.codes}))
+        self.assertTrue(
+            all(code.legality.v1_supported for code in first.codes if code.name)
+        )
         self.assertEqual(first.provenance["split"], "train")
         self.assertEqual(first.provenance["source"], "vpt")
 

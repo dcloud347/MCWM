@@ -494,7 +494,9 @@ def _legality(
     requires_gui = any(gui_open)
     if requires_gui:
         reasons.append("gui_planning_disabled")
-    if cursor_present:
+    # VPT recordings may retain a cursor coordinate during normal gameplay.
+    # Cursor control is relevant only while a GUI is actually open.
+    if requires_gui and cursor_present:
         reasons.append("cursor_planning_unsupported")
     if any(abs(value) > max_camera for tick in camera for value in tick):
         reasons.append("camera_limit")
@@ -667,7 +669,7 @@ def _select_and_number(
             (score, index, code)
             for index, code in enumerate(remaining)
             for score in [_basic_candidate_score(name, code)]
-            if score is not None
+            if score is not None and code.legality.v1_supported
         ]
         if candidates:
             _, index, code = min(candidates, key=lambda value: (value[0], value[1]))
@@ -689,6 +691,31 @@ def _select_and_number(
     )
     selected.extend(remaining[: config.max_codes - len(selected)])
     return tuple(replace(code, code_id=index) for index, code in enumerate(selected))
+
+
+def refresh_codebook_legality(codebook: MacroCodebook) -> MacroCodebook:
+    """Recompute static legality without refitting action or camera clusters."""
+
+    refreshed = []
+    for code in codebook.codes:
+        template = (
+            code.movement,
+            code.interaction,
+            code.hotbar,
+            code.gui_open,
+        )
+        refreshed.append(
+            replace(
+                code,
+                legality=_legality(
+                    template,
+                    code.legality.cursor_present,
+                    codebook.fit_config.max_camera_degrees,
+                    code.camera_mean,
+                ),
+            )
+        )
+    return replace(codebook, codes=tuple(refreshed))
 
 
 def fit_macro_codebook_from_episodes(
