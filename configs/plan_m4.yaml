@@ -24,13 +24,13 @@ environment_fps: 20
 
 cem:
   # 每轮采样多少条完整的 4-macro 候选序列。越大越容易找到好计划，但更慢。
-  candidates: 64
+  candidates: 32
 
   # 每轮保留 cost 最低的候选数量，用这些 elite 更新下一轮采样分布。
-  elites: 16
+  elites: 8
 
   # 重复多少轮“采样 → rollout → 选 elite → 更新分布”。
-  iterations: 4
+  iterations: 2
 
   # 每次送入 GPU rollout 的候选数；只控制峰值显存，不减少 candidates 总数。
   # 4090 若显存不足可降为 2 或 1；更小会更慢，但结果逻辑不变。

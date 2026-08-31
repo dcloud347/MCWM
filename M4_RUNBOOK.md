@@ -149,9 +149,9 @@ PYTHONPATH=src python3 scripts/plan_offline.py \
 2 model ticks / macro
 4 macros / plan
 8-step latent rollout
-64 candidates
+32 candidates
 8 elites
-4 CEM iterations
+2 CEM iterations
 candidate chunk size = 16
 ```
 
@@ -196,9 +196,9 @@ xvfb-run -a env PYTHONPATH=src python3 scripts/run_minerl_mpc.py \
 
 ```yaml
 cem:
-  candidates: 64
+  candidates: 32
   elites: 8
-  iterations: 4
+  iterations: 2
   candidate_chunk_size: 16
 ```
 
@@ -309,4 +309,3 @@ VPT store 构建 codebook。
 
 所有候选都被 camera residual 或 legality 检查拒绝。先确认 GUI planning 关闭、goal
 合理且 codebook 正确；然后降低 `initial_residual_std`，例如从 `0.25` 调到 `0.10`。
-
