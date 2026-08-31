@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from hashlib import sha256
+import importlib
 import random
 from pathlib import Path
+import sys
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
@@ -36,6 +38,37 @@ class CheckpointProvenance:
             raise ValueError("MCWM checkpoints cannot contain external pretrained weights")
         if not self.git_commit or not self.manifest_hash:
             raise ValueError("git_commit and manifest_hash are required provenance")
+
+
+def _install_numpy_pickle_compat() -> None:
+    """Let NumPy 1.x unpickle checkpoints saved by NumPy 2.x.
+
+    NumPy 2 moved several pickle-referenced modules from ``numpy.core`` to
+    ``numpy._core``. MineRL requires NumPy <1.24, so upgrading NumPy just to
+    load an M2 checkpoint would break the MineRL environment.
+    """
+
+    if hasattr(np, "_core"):
+        return
+    try:
+        core = importlib.import_module("numpy.core")
+    except ModuleNotFoundError:
+        return
+    sys.modules.setdefault("numpy._core", core)
+    for name in (
+        "multiarray",
+        "numerictypes",
+        "_multiarray_umath",
+        "_dtype",
+        "_methods",
+        "umath",
+        "overrides",
+    ):
+        try:
+            module = importlib.import_module(f"numpy.core.{name}")
+        except ModuleNotFoundError:
+            continue
+        sys.modules.setdefault(f"numpy._core.{name}", module)
 
 
 def capture_rng_state() -> Dict[str, Any]:
@@ -107,6 +140,7 @@ def read_checkpoint(
 ) -> Dict[str, Any]:
     """读取 checkpoint，并先检查格式版本和权重来源。"""
 
+    _install_numpy_pickle_compat()
     payload = torch.load(
         Path(path),
         map_location="cpu",
