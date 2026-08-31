@@ -18,6 +18,11 @@ def observation_to_tensor(observation: Any) -> Tensor:
     """Convert MineRL ``pov`` observations to training-compatible 3x360x640."""
 
     value = observation.get("pov") if isinstance(observation, Mapping) else observation
+    # MineRL can return a flipped NumPy view with negative strides. PyTorch's
+    # ``as_tensor`` cannot wrap negative-stride arrays without copying them.
+    strides = getattr(value, "strides", None)
+    if strides is not None and any(int(stride) < 0 for stride in strides):
+        value = value.copy()
     frame = torch.as_tensor(value)
     if frame.ndim != 3:
         raise ValueError("MineRL observation must be an HWC or CHW RGB image")
