@@ -132,6 +132,35 @@ class FrameBlockCausalPredictorTest(unittest.TestCase):
             torch.allclose(prediction[:, 1], normalized_first + 2.0)
         )
 
+    def test_context_rollout_keeps_observed_history_and_future_action_aligned(self):
+        model = ActionConditionedPredictor(_config()).eval()
+        context = torch.randn(1, 4, 4, 12)
+        history_actions = torch.randn(1, 3, 12)
+        future_actions = torch.randn(1, 2, 12)
+        seen = []
+
+        def fake_teacher(latents, actions):
+            seen.append((latents.detach().clone(), actions.detach().clone()))
+            return latents + actions.unsqueeze(2)
+
+        with patch.object(
+            model,
+            "predict_teacher_forced",
+            side_effect=fake_teacher,
+        ):
+            prediction = model.rollout_with_context(
+                context,
+                history_actions,
+                future_actions,
+            )
+
+        self.assertEqual(tuple(prediction.shape), (1, 2, 4, 12))
+        self.assertEqual(tuple(seen[0][0].shape), (1, 4, 4, 12))
+        self.assertEqual(tuple(seen[0][1].shape), (1, 4, 12))
+        self.assertTrue(torch.equal(seen[0][1][:, -1], future_actions[:, 0]))
+        self.assertEqual(tuple(seen[1][0].shape), (1, 4, 4, 12))
+        self.assertTrue(torch.equal(seen[1][1][:, -1], future_actions[:, 1]))
+
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
 class TeacherForcedAutoregressiveLossTest(unittest.TestCase):

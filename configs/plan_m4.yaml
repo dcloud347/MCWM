@@ -1,0 +1,27 @@
+# M4 smoke-test defaults. The planner executes only the first 2-tick macro.
+codebook: artifacts/macro_codebook.json
+macro_length: 2
+macro_horizon: 4
+context_frames: 16
+model_fps: 4
+environment_fps: 20
+cem:
+  candidates: 64
+  elites: 8
+  iterations: 4
+  candidate_chunk_size: 16
+  categorical_smoothing: 0.25
+  update_rate: 0.8
+  initial_residual_std: 0.25
+  minimum_residual_std: 0.05
+objective:
+  goal_weight: 1.0
+  goal_l1_weight: 1.0
+  goal_cosine_weight: 1.0
+  action_change_weight: 0.05
+  camera_residual_weight: 0.01
+  invalid_action_penalty: 1000000.0
+legality:
+  gui_planning: false
+  max_camera_degrees: 30.0
+seed: 2026

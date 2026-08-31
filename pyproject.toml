@@ -16,6 +16,23 @@ parquet = ["pyarrow>=12"]
 overlay = ["numpy>=1.24", "opencv-python>=4.8"]
 video = ["av>=10"]
 test = ["pytest>=7"]
+planning = [
+    "torch>=2.1",
+    "numpy>=1.23,<2",
+    "PyYAML>=6",
+    "Pillow>=9",
+]
+# MineRL 1.0 is installed from its official v1.0.0 Git tag. It uses the
+# legacy Gym API and should live in a dedicated Python 3.9/3.10 + JDK 8 env.
+minerl = [
+    "torch>=2.1",
+    "numpy>=1.21,<1.24",
+    "PyYAML>=6",
+    "Pillow>=9",
+    "opencv-python>=4.1.0.25,<5",
+    "gym>=0.13.1,<0.20",
+    "minerl @ git+https://github.com/minerllabs/minerl.git@v1.0.0",
+]
 train = [
     "torch>=2.1",
     "numpy>=1.24",
@@ -31,6 +48,7 @@ train = [
 mcwm-audit-data = "mcwm.data.audit:main"
 mcwm-pretrain-visual = "mcwm.training.pretrain_visual:main"
 mcwm-train-world-model = "mcwm.training.train_world_model:main"
+mcwm-build-macro-codebook = "mcwm.planning.macro_codebook:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -4,9 +4,9 @@ MCWM is a from-scratch, joint-embedding world model for Minecraft 1.16.5. It
 learns from first-person RGB video and keyboard/mouse actions without loading
 external pretrained weights.
 
-The repository implements the data layer, visual pretraining stage, and M2
-action-conditioned latent world-model training stack. No trained checkpoint
-is distributed, and the planning stack remains future work.
+The repository implements the data layer, visual pretraining stage, M2
+action-conditioned latent world-model training, M3 evaluation, and the M4
+planning smoke-test stack. No trained checkpoint is distributed.
 
 ## Project status
 
@@ -16,7 +16,7 @@ is distributed, and the planning stack remains future work.
 | M1        | From-scratch visual encoder, masked-video predictor, EMA, diagnostics, and checkpointing | Implemented; no trained checkpoint is distributed |
 | M2        | Action encoder, block-causal predictor, rollout loss, training, and diagnostics            | Implemented; formal training/gates pending         |
 | M3        | Multi-step latent rollout                                                                | Offline evaluation implemented; baseline pending  |
-| M4        | Online planning smoke test in MineRL (environment only)                                  | Planned                                           |
+| M4        | Online planning smoke test in MineRL (environment only)                                  | Stack implemented; real environment gate pending  |
 
 MCWM is a research codebase under active development, not a pretrained model
 release or a complete Minecraft agent.
@@ -42,6 +42,8 @@ an online evaluation environment, but it must not contribute training data.
 - Minecraft micro-action encoding with padding-safe temporal aggregation.
 - A frame/block-causal latent predictor with teacher-forced and autoregressive loss.
 - M2 training, parent-verified checkpoint resume, B0 smoke gates, and action-sensitivity diagnostics.
+- Deterministic two-tick macro codebooks, hybrid CEM, receding-horizon MPC,
+  MineRL action-repeat adaptation, offline planning, and bounded smoke reports.
 
 The formal M1 model uses 16 frames sampled at 4 FPS and keeps the native
 `640x360` Minecraft frame. Its Video ViT-Large encoder has 304,770,048
@@ -68,6 +70,8 @@ Optional dependency groups are also available for narrower workflows:
 | --- | --- |
 | `train` | PyTorch training, video decoding, W&B, probes, and export |
 | `test` | Test collection with pytest |
+| `planning` | Offline macro-codebook, CEM, and MPC planning |
+| `minerl` | MineRL 1.0 online smoke environment (Python 3.9/3.10 and JDK 8) |
 | `video` | Exact MP4 PTS extraction with PyAV |
 | `overlay` | Action-overlay rendering with OpenCV |
 | `parquet` | Canonical action export with PyArrow |
@@ -105,6 +109,32 @@ Run the M2 synthetic smoke training after installing the training dependencies:
 PYTHONPATH=src python3 scripts/train_world_model.py \
   --config configs/train_world_model_tiny.yaml \
   --synthetic --max-steps 2
+```
+
+Build a deterministic macro-action codebook from the VPT training split:
+
+```bash
+PYTHONPATH=src python3 scripts/build_macro_codebook.py /path/to/vpt-store \
+  --output artifacts/macro_codebook.json
+```
+
+Run one offline goal-image plan from a verified M2 checkpoint:
+
+```bash
+PYTHONPATH=src python3 scripts/plan_offline.py \
+  --checkpoint /path/to/checkpoint-00006000.pt \
+  --codebook artifacts/macro_codebook.json \
+  --observation /path/to/current.png --goal /path/to/goal.png
+```
+
+The live MineRL entry point is `scripts/run_minerl_mpc.py`; it defaults to ten
+planning cycles and writes `m4_smoke.json` even on termination or error.
+
+MineRL 1.0 uses legacy Gym and requires a separate Python 3.9/3.10 environment
+with JDK 8. Install the complete online-planning environment with:
+
+```bash
+python3 -m pip install -e '.[minerl,test]'
 ```
 
 Run formal M2 training on one node with two H100 SXM GPUs:

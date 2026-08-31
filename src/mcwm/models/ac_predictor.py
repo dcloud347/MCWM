@@ -349,6 +349,60 @@ class ActionConditionedPredictor(nn.Module):
             )
         return torch.stack(predictions, dim=1)
 
+    def rollout_with_context(
+        self,
+        context_latents: Tensor,
+        context_actions: Tensor,
+        future_actions: Tensor,
+    ) -> Tensor:
+        """Roll out future actions while retaining observed history.
+
+        ``context_latents`` contains C observed states and ``context_actions``
+        contains the C-1 actions between them. At every predicted step the new
+        candidate action is appended and the most recent ``context_blocks`` are
+        passed through the same block-causal predictor used during training.
+        """
+
+        if context_latents.ndim != 4 or context_latents.shape[1] <= 0:
+            raise ValueError("context_latents must have shape [B, C, S, D]")
+        batch, context_length, spatial, latent_dim = context_latents.shape
+        expected_latent = (self.config.spatial_tokens, self.config.latent_dim)
+        if (spatial, latent_dim) != expected_latent:
+            raise ValueError("context_latents have incompatible spatial/feature dimensions")
+        expected_history = (batch, context_length - 1, self.config.action_dim)
+        if context_actions.shape != expected_history:
+            raise ValueError(
+                "context_actions must have shape [B, C-1, action_dim]"
+            )
+        if future_actions.ndim != 3 or future_actions.shape[:1] != (batch,):
+            raise ValueError("future_actions must have shape [B, H, action_dim]")
+        if future_actions.shape[2] != self.config.action_dim:
+            raise ValueError("future_actions have an incompatible action dimension")
+        if future_actions.shape[1] == 0:
+            return context_latents[:, :0]
+
+        states = [
+            F.layer_norm(value, (value.shape[-1],))
+            for value in context_latents.unbind(dim=1)
+        ]
+        completed_actions = list(context_actions.unbind(dim=1))
+        predictions = []
+        for step in range(future_actions.shape[1]):
+            start = max(0, len(states) - self.config.context_blocks)
+            state_window = torch.stack(states[start:], dim=1)
+            action_window = torch.stack(
+                completed_actions[start:] + [future_actions[:, step]],
+                dim=1,
+            )
+            next_latent = self.predict_teacher_forced(
+                state_window,
+                action_window,
+            )[:, -1]
+            predictions.append(next_latent)
+            states.append(F.layer_norm(next_latent, (next_latent.shape[-1],)))
+            completed_actions.append(future_actions[:, step])
+        return torch.stack(predictions, dim=1)
+
 
 def normalized_latent_l1_loss(prediction: Tensor, target: Tensor) -> Tensor:
     """对最后一维做无仿射 LayerNorm 后计算 FP32 L1。"""
