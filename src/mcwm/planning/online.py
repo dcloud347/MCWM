@@ -61,8 +61,16 @@ def run_mpc_smoke(
     try:
         _, observation, _ = env.reset()
         controller.initialize_context(observation)
+        print(
+            f"[MPC] environment reset; starting {cycles} planning cycles",
+            flush=True,
+        )
         for cycle in range(cycles):
             goal = goal_provider.goal(observation, cycle)
+            print(
+                f"[MPC] cycle {cycle + 1}/{cycles}: planning...",
+                flush=True,
+            )
             planning_started = time.perf_counter()
             result, actions = controller.plan(
                 world_model,
@@ -73,6 +81,12 @@ def run_mpc_smoke(
             planning_seconds = time.perf_counter() - planning_started
             fallback_count += int(result.fallback_reason is not None)
             selected = [int(value) for value in result.code_ids.detach().cpu().tolist()]
+            print(
+                f"[MPC] cycle {cycle + 1}/{cycles}: planned in {planning_seconds:.2f}s; "
+                f"cost={result.cost:.4f}; first_macro={selected[0]}; "
+                f"fallback={result.fallback_reason or 'none'}",
+                flush=True,
+            )
             macro_counts.update(selected[:1])
             reward = 0.0
             executed = 0
@@ -90,6 +104,11 @@ def run_mpc_smoke(
                 truncated = tick.truncated
                 if terminated or truncated:
                     break
+            print(
+                f"[MPC] cycle {cycle + 1}/{cycles}: executed {executed}/2 ticks; "
+                f"reward={reward:.3f}; terminated={terminated}; truncated={truncated}",
+                flush=True,
+            )
             cycle_reports.append(
                 {
                     "cycle": cycle,
@@ -120,6 +139,11 @@ def run_mpc_smoke(
         pending_error = exc
     finally:
         env.close()
+        print(
+            f"[MPC] finished: completed_cycles={len(cycle_reports)}/{cycles}; "
+            f"termination_reason={termination_reason}",
+            flush=True,
+        )
         report = {
             "stage": "m4-minerl-planning-smoke",
             "requested_cycles": cycles,
