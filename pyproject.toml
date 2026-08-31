@@ -22,16 +22,19 @@ planning = [
     "PyYAML>=6",
     "Pillow>=9",
 ]
-# MineRL 1.0 is installed from its official v1.0.0 Git tag. It uses the
+# MineRL 1.0 is installed from its official v1.0.2 Git tag. It uses the
 # legacy Gym API and should live in a dedicated Python 3.9/3.10 + JDK 8 env.
 minerl = [
     "torch>=2.1",
     "numpy>=1.21,<1.24",
     "PyYAML>=6",
     "Pillow>=9",
-    "opencv-python>=4.1.0.25,<5",
-    "gym>=0.13.1,<0.20",
-    "minerl @ git+https://github.com/minerllabs/minerl.git@v1.0.0",
+    # OpenCV 4.12+ requires NumPy 2 on Python 3.10, while MineRL requires <1.24.
+    "opencv-python>=4.1.0.25,<4.12",
+    # MineRL 1.0 supports the pre-0.24 Gym API through 0.23.1. Avoid 0.19.0:
+    # its legacy package metadata cannot be built by current setuptools.
+    "gym>=0.19.0,<=0.23.1",
+    "minerl @ git+https://github.com/minerllabs/minerl.git@v1.0.2",
 ]
 train = [
     "torch>=2.1",
