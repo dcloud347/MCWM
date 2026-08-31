@@ -52,7 +52,7 @@ class MacroCodebookFitConfig:
     max_clusters_per_group: int = 4
     min_group_samples: int = 32
     min_cluster_samples: int = 8
-    max_codes: int = 256
+    max_codes: int = 512
     max_camera_degrees: float = 30.0
     camera_std_floor: float = 0.25
     residual_quantile: float = 0.99
@@ -825,7 +825,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("data_root", type=Path)
     parser.add_argument("--output", type=Path, default=Path("macro_codebook.json"))
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--max-codes", type=int, default=256)
+    parser.add_argument("--max-codes", type=int, default=512)
     parser.add_argument("--min-group-samples", type=int, default=32)
     parser.add_argument("--min-cluster-samples", type=int, default=8)
     parser.add_argument("--max-clusters-per-group", type=int, default=4)
