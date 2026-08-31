@@ -1,27 +1,84 @@
-# M4 smoke-test defaults. The planner executes only the first 2-tick macro.
+# M4 Hybrid CEM + MPC 默认配置。
+# 每次规划 4 个 macro（共 8 个 model ticks），但 MPC 只执行第一个 macro，
+# 即执行 2 个 model ticks 后读取新 observation，再重新规划。
+
+# codebook 的约定默认位置。当前运行脚本仍要求通过 --codebook 显式传入路径。
 codebook: artifacts/macro_codebook.json
+
+# 一个 macro 包含几个 model ticks。v1 codebook 固定为 2，必须与 codebook 一致。
 macro_length: 2
+
+# 一次规划包含几个 macro：4 macro × 2 ticks = 8-step latent horizon。
+# 在 4 FPS 下，对应向未来预测约 2 秒。
 macro_horizon: 4
+
+# world model 规划时最多使用多少帧历史 observation；16 帧在 4 FPS 下约为 4 秒。
 context_frames: 16
+
+# world model 的动作/画面频率。每个 model tick 持续 1 / 4 秒。
 model_fps: 4
+
+# MineRL 环境的原始动作频率。20 / 4 = 5，所以每个 model tick 在环境中重复 5 次。
+# environment_fps 必须能被 model_fps 整除，并与构建 codebook 时的设置一致。
 environment_fps: 20
+
 cem:
+  # 每轮采样多少条完整的 4-macro 候选序列。越大越容易找到好计划，但更慢。
   candidates: 64
-  elites: 8
+
+  # 每轮保留 cost 最低的候选数量，用这些 elite 更新下一轮采样分布。
+  elites: 16
+
+  # 重复多少轮“采样 → rollout → 选 elite → 更新分布”。
   iterations: 4
+
+  # 每次送入 GPU rollout 的候选数；只控制峰值显存，不减少 candidates 总数。
+  # 4090 若显存不足可降为 2 或 1；更小会更慢，但结果逻辑不变。
   candidate_chunk_size: 16
+
+  # 更新 categorical code 概率时，给每个合法 code 加的平滑伪计数。
+  # 防止某个 code 概率过早变成 0，后续再也采不到。
   categorical_smoothing: 0.25
-  update_rate: 0.8
+
+  # 新 elite 统计对采样分布的更新强度：0.6 表示 60% 新分布 + 40% 旧分布。
+  update_rate: 0.6
+
+  # camera residual 初始 Gaussian 标准差，单位为 camera delta 的度。
+  # residual 是在 codebook 的 camera_mean 上额外增加的小幅镜头修正。
   initial_residual_std: 0.25
+
+  # CEM 更新后允许的最小 residual 标准差，避免分布过早收缩成一个点。
   minimum_residual_std: 0.05
+
 objective:
+  # 最终目标 cost 的总权重。总目标项 = goal_weight × latent_goal_cost。
   goal_weight: 1.0
+
+  # latent_goal_cost 中，预测 latent 与 goal latent 的平均 L1 距离权重。
   goal_l1_weight: 1.0
+
+  # latent_goal_cost 中，1 - cosine_similarity 的权重，用来比较 latent 方向。
   goal_cosine_weight: 1.0
+
+  # 相邻 tick 间 movement/interaction 按键变化，以及 hotbar 频繁切换的惩罚权重。
+  # 它让动作更平滑，但不是简单地惩罚“换了 macro code”。
   action_change_weight: 0.05
+
+  # camera residual 大小的惩罚权重，抑制规划器过度偏离 codebook camera_mean。
+  # residual 会先除以每个 code 的 camera_std，再计算均方值。
   camera_residual_weight: 0.01
+
+  # 候选出现越界 camera、residual 超限或 NaN/Inf 时加入的大额 cost。
+  # 静态非法 code 会更早被 legality mask 设为零概率，不参与采样。
   invalid_action_penalty: 1000000.0
+
 legality:
+  # 首版默认不规划背包、箱子、合成台等 GUI 动作。
+  # 即使设为 true，当前版本没有 cursor 模型，带 cursor 的 GUI code 仍会被屏蔽。
   gui_planning: false
-  max_camera_degrees: 30.0
+
+  # 每个 model tick 允许的最大 pitch/yaw camera delta（度）；超过即判为非法。
+  max_camera_degrees: 45.0
+
+# CEM 随机种子；相同输入、模型、配置和 seed_offset 可复现相同采样结果。
 seed: 2026
