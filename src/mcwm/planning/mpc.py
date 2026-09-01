@@ -90,6 +90,7 @@ class RecedingHorizonMPC:
     previous_action: Optional[CanonicalActionTick] = None
     max_context: int = 16
     context_frames: List[Tensor] = field(default_factory=list)
+    context_latent_cache: List[Optional[Tensor]] = field(default_factory=list)
     context_actions: List[CanonicalActionTick] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -103,6 +104,7 @@ class RecedingHorizonMPC:
             raise ValueError("observation must have shape [C, H, W]")
         frame = observation.detach()
         self.context_frames = [frame] * self.max_context
+        self.context_latent_cache = [None] * self.max_context
         self.context_actions = [
             CanonicalActionTick.noop(
                 -(self.max_context - index - 1) * tick_ms,
@@ -124,8 +126,55 @@ class RecedingHorizonMPC:
             raise RuntimeError("initialize_context must be called before recording")
         self.context_actions.append(action)
         self.context_frames.append(observation.detach())
+        self.context_latent_cache.append(None)
         self.context_frames = self.context_frames[-self.max_context :]
+        self.context_latent_cache = self.context_latent_cache[-self.max_context :]
         self.context_actions = self.context_actions[-(self.max_context - 1) :]
+
+    def _encode_context_frames(self, world_model: object, device: torch.device) -> Tensor:
+        """Encode only context frames whose latent is not cached yet."""
+
+        if len(self.context_latent_cache) != len(self.context_frames):
+            self.context_latent_cache = [None] * len(self.context_frames)
+        elif any(
+            latent is not None and latent.device != device
+            for latent in self.context_latent_cache
+        ):
+            # A controller can be reused after moving the world model to another
+            # device; cached tensors from the old device are no longer valid.
+            self.context_latent_cache = [None] * len(self.context_frames)
+
+        missing = [
+            index
+            for index, latent in enumerate(self.context_latent_cache)
+            if latent is None
+        ]
+        if missing:
+            frames = torch.stack(
+                [self.context_frames[index] for index in missing]
+            ).unsqueeze(0).to(device)
+            encoded = world_model.encode_frames(frames)
+            for offset, index in enumerate(missing):
+                self.context_latent_cache[index] = encoded[0, offset].detach()
+
+        if any(latent is None for latent in self.context_latent_cache):
+            raise RuntimeError("context latent cache contains an unencoded frame")
+        return torch.stack(
+            [latent for latent in self.context_latent_cache if latent is not None],
+            dim=0,
+        ).unsqueeze(0)
+
+    @staticmethod
+    def _same_frame(left: Tensor, right: Tensor) -> bool:
+        """Return whether two observations share the same underlying storage."""
+
+        return (
+            left.shape == right.shape
+            and left.dtype == right.dtype
+            and left.device == right.device
+            and left.data_ptr() == right.data_ptr()
+            and left.storage_offset() == right.storage_offset()
+        )
 
     def _encode_context_actions(self, world_model: object, device: torch.device) -> Tensor:
         actions = self.context_actions
@@ -187,13 +236,14 @@ class RecedingHorizonMPC:
         else:
             # The caller may pass the same latest observation again at the cycle
             # boundary. Intermediate tick observations enter via record_transition().
-            self.context_frames[-1] = observation.detach()
+            if not self._same_frame(self.context_frames[-1], observation):
+                self.context_frames[-1] = observation.detach()
+                self.context_latent_cache[-1] = None
         try:
             model_device = next(world_model.parameters()).device
         except (AttributeError, StopIteration):
             model_device = observation.device
-        frames = torch.stack(self.context_frames).unsqueeze(0).to(model_device)
-        context_latents = world_model.encode_frames(frames)
+        context_latents = self._encode_context_frames(world_model, model_device)
         context_action_tokens = self._encode_context_actions(
             world_model, context_latents.device
         )
