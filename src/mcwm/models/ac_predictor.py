@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -131,6 +131,51 @@ class BlockCausalAttention(nn.Module):
         attended = attended.transpose(1, 2).reshape(batch, tokens, dim)
         return self.output(attended)
 
+    def forward_with_cache(
+        self,
+        inputs: Tensor,
+        position_ids: Tensor,
+        rope_grid_size: Tuple[int, int, int],
+        past_key_value: Optional[Tuple[Tensor, Tensor]] = None,
+        attention_mask: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        """Attend to the current block and optionally cached past blocks."""
+
+        batch, tokens, dim = inputs.shape
+        if position_ids.shape != (batch, tokens):
+            raise ValueError("position_ids must have shape [B, N]")
+        if past_key_value is not None and attention_mask is not None:
+            raise ValueError("cached attention cannot use an attention mask")
+        if attention_mask is not None and attention_mask.shape != (tokens, tokens):
+            raise ValueError("attention_mask must have shape [N, N]")
+
+        qkv = self.qkv(inputs).reshape(
+            batch, tokens, 3, self.heads, self.head_dim
+        )
+        query, key, value = qkv.unbind(dim=2)
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+        query, key = _apply_3d_rope(
+            query, key, position_ids, rope_grid_size
+        )
+        if past_key_value is not None:
+            key = torch.cat((past_key_value[0], key), dim=2)
+            value = torch.cat((past_key_value[1], value), dim=2)
+        attended = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=(
+                None
+                if attention_mask is None
+                else attention_mask.view(1, 1, tokens, tokens)
+            ),
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        attended = attended.transpose(1, 2).reshape(batch, tokens, dim)
+        return self.output(attended), (key, value)
+
 
 class BlockCausalTransformerBlock(nn.Module):
     """一个 pre-norm block-causal Transformer 层。"""
@@ -171,6 +216,26 @@ class BlockCausalTransformerBlock(nn.Module):
             rope_grid_size,
         )
         return inputs + self.mlp(self.mlp_norm(inputs))
+
+    def forward_with_cache(
+        self,
+        inputs: Tensor,
+        position_ids: Tensor,
+        rope_grid_size: Tuple[int, int, int],
+        past_key_value: Optional[Tuple[Tensor, Tensor]] = None,
+        attention_mask: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        """Run one block while returning its attention K/V cache."""
+
+        attended, key_value = self.attention.forward_with_cache(
+            self.attention_norm(inputs),
+            position_ids,
+            rope_grid_size,
+            past_key_value,
+            attention_mask,
+        )
+        inputs = inputs + attended
+        return inputs + self.mlp(self.mlp_norm(inputs)), key_value
 
 
 class ActionConditionedPredictor(nn.Module):
@@ -240,6 +305,98 @@ class ActionConditionedPredictor(nn.Module):
         action = frame_offsets.unsqueeze(1)
         positions = torch.cat((action, visual), dim=1).reshape(1, -1)
         return positions.expand(batch, -1)
+
+    def _cached_step(
+        self,
+        latent: Tensor,
+        action: Tensor,
+        caches: List[Tuple[Tensor, Tensor]],
+        block_index: int,
+    ) -> Tuple[Tensor, List[Tuple[Tensor, Tensor]]]:
+        """Predict one block using K/V from all previously processed blocks."""
+
+        spatial_tokens = self.config.spatial_tokens
+        visual_tokens = self.visual_projection(latent)
+        action_token = self.action_projection(action).unsqueeze(1)
+        tokens = torch.cat((action_token, visual_tokens), dim=1)
+        position_ids = (
+            self._position_ids(latent.shape[0], 1, latent.device)
+            + block_index * self.config.spatial_tokens
+        )
+        rows, columns = self.config.spatial_grid
+        rope_grid_size = (self.config.context_blocks, rows, columns)
+        next_caches: List[Tuple[Tensor, Tensor]] = []
+        max_tokens = self.config.context_blocks * self.config.block_size
+        for index, block in enumerate(self.blocks):
+            tokens, key_value = block.forward_with_cache(
+                tokens,
+                position_ids,
+                rope_grid_size,
+                caches[index] if caches else None,
+            )
+            next_caches.append(
+                (
+                    key_value[0][:, :, -max_tokens:],
+                    key_value[1][:, :, -max_tokens:],
+                )
+            )
+        tokens = self.norm(tokens)
+        prediction = self.output_projection(
+            tokens[:, 1 : spatial_tokens + 1]
+        )
+        return prediction, next_caches
+
+    def _cached_context(
+        self,
+        latents: Tensor,
+        actions: Tensor,
+    ) -> Tuple[Tensor, List[Tuple[Tensor, Tensor]]]:
+        """Process an initial context once and retain every layer's K/V."""
+
+        self._validate_teacher_inputs(latents, actions)
+        batch, block_count, spatial_tokens, _ = latents.shape
+        visual_tokens = self.visual_projection(latents)
+        action_tokens = self.action_projection(actions).unsqueeze(2)
+        tokens = torch.cat((action_tokens, visual_tokens), dim=2).reshape(
+            batch, block_count * self.config.block_size, -1
+        )
+        position_ids = self._position_ids(batch, block_count, latents.device)
+        attention_mask = block_causal_attention_mask(
+            block_count, self.config.block_size, device=latents.device
+        )
+        rows, columns = self.config.spatial_grid
+        rope_grid_size = (block_count, rows, columns)
+        caches: List[Tuple[Tensor, Tensor]] = []
+        for block in self.blocks:
+            tokens, key_value = block.forward_with_cache(
+                tokens,
+                position_ids,
+                rope_grid_size,
+                attention_mask=attention_mask,
+            )
+            caches.append(key_value)
+        tokens = self.output_projection(
+            self.norm(tokens).reshape(
+                batch, block_count, self.config.block_size, self.config.dim
+            )[:, :, 1 : spatial_tokens + 1]
+        )
+        return tokens[:, -1], caches
+
+    def _rollout_cached(
+        self,
+        initial_latent: Tensor,
+        actions: Tensor,
+    ) -> Tensor:
+        states = F.layer_norm(initial_latent, (initial_latent.shape[-1],))
+        caches: List[Tuple[Tensor, Tensor]] = []
+        predictions = []
+        for step in range(actions.shape[1]):
+            next_latent, caches = self._cached_step(
+                states, actions[:, step], caches, step
+            )
+            predictions.append(next_latent)
+            states = F.layer_norm(next_latent, (next_latent.shape[-1],))
+        return torch.stack(predictions, dim=1)
 
     def predict_teacher_forced(self, latents: Tensor, actions: Tensor) -> Tensor:
         """并行预测每个真实当前 latent 对应的下一帧 latent。"""
@@ -322,6 +479,13 @@ class ActionConditionedPredictor(nn.Module):
         if horizon == 0:
             return initial_latent.unsqueeze(1)[:, :0]
 
+        if (
+            not self.training
+            and not torch.is_grad_enabled()
+            and horizon <= self.config.context_blocks
+        ):
+            return self._rollout_cached(initial_latent, actions)
+
         states = [
             F.layer_norm(
                 initial_latent,
@@ -380,6 +544,39 @@ class ActionConditionedPredictor(nn.Module):
             raise ValueError("future_actions have an incompatible action dimension")
         if future_actions.shape[1] == 0:
             return context_latents[:, :0]
+
+        if (
+            not self.training
+            and not torch.is_grad_enabled()
+            and context_length + future_actions.shape[1]
+            <= self.config.context_blocks
+        ):
+            normalized_context = F.layer_norm(
+                context_latents, (context_latents.shape[-1],)
+            )
+            context_start = max(
+                0, context_length - self.config.context_blocks
+            )
+            normalized_context = normalized_context[:, context_start:]
+            first_actions = torch.cat(
+                (context_actions[:, context_start:], future_actions[:, :1]),
+                dim=1,
+            )
+            next_latent, caches = self._cached_context(
+                normalized_context, first_actions
+            )
+            predictions = [next_latent]
+            state = F.layer_norm(next_latent, (next_latent.shape[-1],))
+            for step in range(1, future_actions.shape[1]):
+                next_latent, caches = self._cached_step(
+                    state,
+                    future_actions[:, step],
+                    caches,
+                    normalized_context.shape[1] - 1 + step,
+                )
+                predictions.append(next_latent)
+                state = F.layer_norm(next_latent, (next_latent.shape[-1],))
+            return torch.stack(predictions, dim=1)
 
         states = [
             F.layer_norm(value, (value.shape[-1],))

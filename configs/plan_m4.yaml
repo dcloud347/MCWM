@@ -8,12 +8,12 @@ codebook: artifacts/macro_codebook.json
 # 一个 macro 包含几个 model ticks。v1 codebook 固定为 2，必须与 codebook 一致。
 macro_length: 2
 
-# 一次规划包含几个 macro：4 macro × 2 ticks = 8-step latent horizon。
-# 在 4 FPS 下，对应向未来预测约 2 秒。
-macro_horizon: 4
+# 一次规划包含几个 macro：3 macro × 2 ticks = 6-step latent horizon。
+# 在 4 FPS 下，对应向未来预测约 1.5 秒。
+macro_horizon: 3
 
-# world model 规划时最多使用多少帧历史 observation；16 帧在 4 FPS 下约为 4 秒。
-context_frames: 16
+# world model 规划时最多使用多少帧历史 observation；10 帧在 4 FPS 下约为 2.5 秒。
+context_frames: 10
 
 # world model 的动作/画面频率。每个 model tick 持续 1 / 4 秒。
 model_fps: 4
