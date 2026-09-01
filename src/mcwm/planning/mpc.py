@@ -92,6 +92,8 @@ class RecedingHorizonMPC:
     context_frames: List[Tensor] = field(default_factory=list)
     context_latent_cache: List[Optional[Tensor]] = field(default_factory=list)
     context_actions: List[CanonicalActionTick] = field(default_factory=list)
+    goal_frame_cache: Optional[Tensor] = None
+    goal_latent_cache: Optional[Tensor] = None
 
     def __post_init__(self) -> None:
         if self.max_context < 2:
@@ -249,12 +251,31 @@ class RecedingHorizonMPC:
         )
         goal = goal_image
         if goal.ndim == 3:
+            goal_frame = goal
             goal = goal.unsqueeze(0).unsqueeze(0)
         elif goal.ndim == 4:
+            if goal.shape[0] != 1:
+                raise ValueError("goal_image must describe one [C, H, W] frame")
+            goal_frame = goal[0]
             goal = goal.unsqueeze(1)
+        else:
+            goal_frame = None
         if goal.ndim != 5 or goal.shape[:2] != (1, 1):
             raise ValueError("goal_image must describe one [C, H, W] frame")
-        goal_latent = world_model.encode_frames(goal.to(model_device))[:, 0]
+        if goal_frame is None:
+            raise ValueError("goal_image must describe one [C, H, W] frame")
+        goal_frame = goal_frame.detach()
+        if (
+            self.goal_latent_cache is None
+            or self.goal_latent_cache.device != model_device
+            or self.goal_frame_cache is None
+            or not self._same_frame(self.goal_frame_cache, goal_frame)
+        ):
+            self.goal_frame_cache = goal_frame
+            self.goal_latent_cache = world_model.encode_frames(
+                goal.to(model_device)
+            )[:, 0].detach()
+        goal_latent = self.goal_latent_cache
         result = self.planner.plan_latents(
             world_model,
             context_latents[:, -1],
