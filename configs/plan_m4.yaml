@@ -34,7 +34,7 @@ cem:
 
   # 每次送入 GPU rollout 的候选数；只控制峰值显存，不减少 candidates 总数。
   # 4090 若显存不足可降为 2 或 1；更小会更慢，但结果逻辑不变。
-  candidate_chunk_size: 8
+  candidate_chunk_size: 16
 
   # 更新 categorical code 概率时，给每个合法 code 加的平滑伪计数。
   # 防止某个 code 概率过早变成 0，后续再也采不到。
