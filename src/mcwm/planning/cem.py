@@ -265,7 +265,7 @@ class HybridCEMPlanner:
             fallback_reason=reason,
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def plan_latents(
         self,
         world_model: object,
@@ -456,7 +456,7 @@ class HybridCEMPlanner:
             predicted_goal_costs=best_trajectory,
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def plan_observations(
         self,
         world_model: object,

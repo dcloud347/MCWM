@@ -166,6 +166,7 @@ class RecedingHorizonMPC:
             valid_mask=valid_mask,
         )
 
+    @torch.inference_mode()
     def plan(
         self,
         world_model: object,
